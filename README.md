@@ -18,6 +18,10 @@ Aegis Gateway is being built to sit between users and AI models. Like a checkpoi
 
 > **What works now:** API-key authentication, strict request validation, and per-client Redis rate limiting that fails closed. The `/chat` endpoint currently echoes an allowed message; it does **not** call an AI model yet. Prompt screening, caching, routing, and observability are planned, not shipped.
 
+<p align="center">
+  <img src="docs/images/aegis-overview.png" width="720" alt="Aegis Gateway overview: each request is authenticated (401), rate-limited (429) and validated (422) before reaching the LLM; Redis outages fail closed with 503. Phases 0 and 1 are done; phases 2 to 7 are next.">
+</p>
+
 ## Why it matters
 
 | Challenge | How a gateway can help |
