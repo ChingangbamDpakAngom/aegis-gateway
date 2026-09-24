@@ -16,35 +16,40 @@ Control requests today. Build toward safer, more efficient AI systems tomorrow.
 
 Aegis Gateway is being built to sit between users and AI models. Like a checkpoint at a building entrance, it checks incoming requests before they are allowed through. This helps keep an AI application reliable when usage grows and creates one place to add safeguards, caching, and smarter model selection.
 
-> **What works in v0.1.0:** Request validation and Redis-backed rate limiting. The `/chat` endpoint currently echoes an allowed message; it does **not** call an AI model. Security screening, caching, routing, and observability are planned features, not shipped features.
+> **What works now:** API-key authentication, strict request validation, and per-client Redis rate limiting that fails closed. The `/chat` endpoint currently echoes an allowed message; it does **not** call an AI model yet. Prompt screening, caching, routing, and observability are planned, not shipped.
 
 ## Why it matters
 
 | Challenge | How a gateway can help |
 |---|---|
-| One user sends too many requests | Limit requests per user before they overwhelm the service |
-| Requests are missing required data | Reject invalid inputs before processing |
+| Anyone can call the service | Require an API key and decide identity server-side |
+| One client sends too many requests | Limit requests per client before they overwhelm the service |
+| Requests are malformed or oversized | Reject invalid inputs before processing |
 | Repeated AI requests cost money | A future cache can reuse suitable responses |
 | Requests vary in difficulty | A future router can select an appropriate model |
 | Suspicious prompts reach a model | A future screening step can flag potential attacks |
 
-The first two protections are implemented. The remaining items describe the roadmap.
+The first three protections are implemented. The remaining items describe the roadmap.
 
 ## Current request flow
 
-The diagram below represents the running v0.1.0 application, not the eventual architecture.
+The diagram below represents the running application, not the eventual architecture.
 
 ```mermaid
 flowchart TD
-    A["POST /chat"] --> B["Validate request<br/>FastAPI + Pydantic"]
-    B --> C["Check user limit<br/>Redis + Lua token bucket"]
-    C -->|"Allowed"| D["200 OK<br/>Echo the message"]
-    C -->|"Limit reached"| E["429 Too Many Requests"]
+    A["POST /chat<br/>X-API-Key header"] --> B{"Known key?<br/>SHA-256 lookup in Redis"}
+    B -->|"No"| X["401 missing/invalid_api_key"]
+    B -->|"Yes"| C{"Token in client's bucket?<br/>Redis + Lua"}
+    C -->|"No"| Y["429 rate_limited + Retry-After"]
+    C -->|"Yes"| D{"Valid body?<br/>Pydantic"}
+    D -->|"No"| Z["422 invalid_request"]
+    D -->|"Yes"| E["200 OK<br/>Echo the message"]
 ```
 
 - `/health` reports whether the API process is running.
-- `/chat` expects a `user_id` and `message`. Missing fields receive a validation error.
-- Each user has a separate bucket with a capacity of 10 requests and a refill rate of 1 token per second.
+- `/chat` requires an `X-API-Key` header and a body of exactly `{"message": "..."}` (1–4000 characters; unknown fields are rejected). Identity comes from the key, never from the body ([ADR-002](docs/adr/0002-api-key-identity.md)).
+- Keys are stored only as SHA-256 hashes. Each client has its own bucket (default capacity 10, refill 1 token/s), and a key can carry its own limits. Keys of the same client share a bucket, so rotating a key doesn't reset the limit.
+- Every error has the same shape: `{"error": {"code": "...", "message": "..."}}`.
 - Redis runs the token-bucket check and update in one Lua script, so two simultaneous requests cannot spend the same token. The script uses Redis's clock, so every gateway instance agrees on the time.
 - When the bucket is empty, the `429` response carries a `Retry-After` header saying how many seconds to wait.
 - If Redis is unreachable, `/chat` **fails closed** with `503` within about half a second instead of serving requests unchecked ([ADR-001](docs/adr/0001-token-bucket-in-redis-fail-closed.md)).
@@ -104,26 +109,36 @@ Open the interactive API documentation at:
 http://127.0.0.1:8000/docs
 ```
 
+### Create an API key
+
+```bash
+uv run python -m gateway.keys my-app                 # default limits
+uv run python -m gateway.keys my-app --capacity 5 --refill-per-s 0.5
+```
+
+The key (`aeg_...`) is printed **once**. Only its hash is stored.
+
 ### Try a request
 
-Use the interactive `/docs` page, or run:
+In the `/docs` page click **Authorize** and paste the key, or run:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/chat \
+  -H "X-API-Key: aeg_your_key_here" \
   -H "Content-Type: application/json" \
-  -d '{"user_id":"user-123","message":"Hello Aegis"}'
+  -d '{"message":"Hello Aegis"}'
 ```
 
 While a token is available, the response is:
 
 ```json
-{"echo":"Hello Aegis","from":"user-123"}
+{"echo":"Hello Aegis","client_id":"my-app"}
 ```
 
-When the user's bucket is empty, the API returns HTTP `429`:
+When the client's bucket is empty, the API returns HTTP `429` with a `Retry-After` header:
 
 ```json
-{"detail":"Rate limit exceeded"}
+{"error":{"code":"rate_limited","message":"Rate limit exceeded"}}
 ```
 
 The health endpoint is available at:
@@ -141,9 +156,9 @@ docker compose up -d
 uv run pytest -q
 ```
 
-Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers validation, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, and fail-closed behaviour when Redis is down. GitHub Actions runs the same suite on every push, with a Redis service container.
+Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers API-key authentication (missing, unknown, stored hashed), request validation (empty, oversized, unknown fields), the uniform error format, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, key rotation sharing a bucket, and fail-closed behaviour when Redis is down. GitHub Actions runs the same suite on every push, with a Redis service container.
 
-Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (see [`config.py`](src/gateway/config.py)).
+Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (defaults for keys without their own limits), `MAX_MESSAGE_CHARS` (see [`config.py`](src/gateway/config.py)).
 
 The Prompt Guard experiment needs PyTorch, which is kept out of the default install: `uv sync --group ml`.
 
@@ -164,6 +179,7 @@ aegis-gateway/
 │       │       └── token_bucket.lua
 │       ├── __init__.py
 │       ├── config.py              # Settings from environment variables
+│       ├── keys.py                # API-key creation CLI + hashing
 │       └── py.typed
 ├── tests/                         # Automated tests (real Redis, DB 15)
 ├── docs/
@@ -182,10 +198,11 @@ Additional modules will be added as their features are implemented. Experimental
 ## Roadmap
 
 - [x] Validate incoming requests with FastAPI and Pydantic
-- [x] Apply per-user rate limiting with Redis and Lua
+- [x] Apply per-client rate limiting with Redis and Lua
 - [x] Add basic API tests and verify the `429` path manually
 - [x] Phase 0: async Redis, env config, fail-closed limiter, deterministic tests, CI ([notes](docs/phases/phase-0.md))
-- [ ] Add readiness checking and structured logging
+- [x] Phase 1: hashed API keys, per-client limits, strict request contract, uniform errors ([notes](docs/phases/phase-1.md))
+- [ ] Phase 2: readiness checking, request IDs, structured logging, metrics
 - [ ] Evaluate and integrate prompt-injection screening
 - [ ] Add exact-match caching and model routing
 - [ ] Connect an AI model and measure latency and cost
