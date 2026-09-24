@@ -1,7 +1,7 @@
 [project]
 name = "gateway"
 version = "0.1.0"
-description = "Add your description here"
+description = "An API gateway that screens, rate-limits and routes requests to LLMs"
 readme = "README.md"
 authors = [
     { name = "ChingangbamDpakAngom", email = "cdeepakangom@gmail.com" }
@@ -11,8 +11,6 @@ dependencies = [
     "fastapi>=0.141.1",
     "python-dotenv>=1.2.3",
     "redis>=8.1.0",
-    "torch>=2.14.0",
-    "transformers>=5.17.0",
     "uvicorn[standard]>=0.53.0",
 ]
 
@@ -22,7 +20,10 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "httpx2>=2.13.1",
     "pytest>=9.1.1",
+]
+ml = [
+    "torch>=2.14.0",
+    "transformers>=5.17.0",
 ]

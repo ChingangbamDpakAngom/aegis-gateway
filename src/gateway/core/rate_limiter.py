@@ -1,14 +1,14 @@
-import time
-import redis
+from pathlib import Path
 
-redis_client = redis.Redis(host = 'localhost', port = 6379, decode_responses=True)
+from redis.commands.core import AsyncScript
 
-with open("src/gateway/core/lua/token_bucket.lua", "r") as f:
-    rate_limit_script = redis_client.register_script(f.read())
+# Resolved relative to this file, so it loads no matter where the app is started from.
+TOKEN_BUCKET_LUA = (Path(__file__).parent / "lua" / "token_bucket.lua").read_text()
 
-def is_allowed(user_id: str, capacity: int = 10, refill_rate: float = 1.0 ) -> bool:
-    result = rate_limit_script(
-        keys = [f"ratelimit:{user_id}"],
-        args = [capacity, refill_rate, time.time()]
-    )
-    return result == 1
+
+async def take_token(
+    script: AsyncScript, key: str, capacity: int, refill_per_s: float
+) -> tuple[bool, float]:
+    """Spend one token from `key`'s bucket. Returns (allowed, seconds until a token is free)."""
+    allowed, retry_ms = await script(keys=[f"ratelimit:{key}"], args=[capacity, refill_per_s])
+    return allowed == 1, retry_ms / 1000

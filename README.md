@@ -7,8 +7,8 @@
 Control requests today. Build toward safer, more efficient AI systems tomorrow.
 
 ![Status: v0.1.0 MVP](https://img.shields.io/badge/status-v0.1.0%20MVP-243B53?style=flat-square)
-![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)
-![Tests: 3 passing](https://img.shields.io/badge/tests-3%20passing-2E7D32?style=flat-square)
+![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)
+![CI](https://github.com/ChingangbamDpakAngom/aegis-gateway/actions/workflows/ci.yml/badge.svg)
 
 </div>
 
@@ -45,7 +45,9 @@ flowchart TD
 - `/health` reports whether the API process is running.
 - `/chat` expects a `user_id` and `message`. Missing fields receive a validation error.
 - Each user has a separate bucket with a capacity of 10 requests and a refill rate of 1 token per second.
-- Redis runs the token-bucket check and update in one Lua script, so two simultaneous requests cannot spend the same token.
+- Redis runs the token-bucket check and update in one Lua script, so two simultaneous requests cannot spend the same token. The script uses Redis's clock, so every gateway instance agrees on the time.
+- When the bucket is empty, the `429` response carries a `Retry-After` header saying how many seconds to wait.
+- If Redis is unreachable, `/chat` **fails closed** with `503` within about half a second instead of serving requests unchecked ([ADR-001](docs/adr/0001-token-bucket-in-redis-fail-closed.md)).
 
 ## Tools and technologies
 
@@ -82,7 +84,7 @@ flowchart TD
 
 ### Prerequisites
 
-- Python 3.11 or later
+- Python 3.12 or later
 - [uv](https://docs.astral.sh/uv/)
 - Docker Desktop with its engine running
 
@@ -139,15 +141,11 @@ docker compose up -d
 uv run pytest -q
 ```
 
-The v0.1.0 automated suite currently verifies:
+Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers validation, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, and fail-closed behaviour when Redis is down. GitHub Actions runs the same suite on every push, with a Redis service container.
 
-- `GET /health` returns `200 OK`.
-- A valid `POST /chat` request returns `200 OK` with the expected echo response.
-- An invalid chat request is rejected by request validation.
+Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (see [`config.py`](src/gateway/config.py)).
 
-Rate limiting has also been verified manually with repeated requests from the same `user_id`: requests are allowed while tokens remain and receive HTTP `429 Too Many Requests` when the bucket is exhausted.
-
-> **Test coverage note:** Deterministic automated tests for bucket exhaustion, token refill, separate user buckets, and Redis-unavailable behaviour are the next testing milestone.
+The Prompt Guard experiment needs PyTorch, which is kept out of the default install: `uv sync --group ml`.
 
 ## Project layout
 
@@ -165,10 +163,13 @@ aegis-gateway/
 │       │   └── lua/
 │       │       └── token_bucket.lua
 │       ├── __init__.py
+│       ├── config.py              # Settings from environment variables
 │       └── py.typed
-├── tests/                         # Automated tests
+├── tests/                         # Automated tests (real Redis, DB 15)
 ├── docs/
-│   └── adr/                       # Architecture Decision Records
+│   ├── adr/                       # Architecture Decision Records
+│   └── phases/                    # Per-phase design + study notes
+├── .github/workflows/ci.yml       # Tests on every push
 ├── docker-compose.yml             # Local Redis service
 ├── pyproject.toml                 # Project configuration and dependencies
 ├── uv.lock                        # Locked dependency versions
@@ -178,14 +179,12 @@ aegis-gateway/
 
 Additional modules will be added as their features are implemented. Experimental scripts are kept separate from the running API and test suite.
 
-> **Note:** Git does not track empty folders. Add a Markdown file to `docs/adr/` before relying on that directory being present in the GitHub repository.
-
 ## Roadmap
 
 - [x] Validate incoming requests with FastAPI and Pydantic
 - [x] Apply per-user rate limiting with Redis and Lua
 - [x] Add basic API tests and verify the `429` path manually
-- [ ] Add deterministic rate-limit and Redis-failure tests
+- [x] Phase 0: async Redis, env config, fail-closed limiter, deterministic tests, CI ([notes](docs/phases/phase-0.md))
 - [ ] Add readiness checking and structured logging
 - [ ] Evaluate and integrate prompt-injection screening
 - [ ] Add exact-match caching and model routing
