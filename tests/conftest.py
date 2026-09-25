@@ -2,6 +2,8 @@ import os
 
 # Tests use their own Redis database so they never touch dev data. Set before the app is imported.
 os.environ["REDIS_URL"] = os.getenv("TEST_REDIS_URL", "redis://localhost:6379/15")
+# No torch or model download in tests: the client fixture plugs in a fake guard.
+os.environ["GUARD_ENABLED"] = "false"
 
 import httpx2
 import pytest
@@ -26,12 +28,22 @@ def use_model(handler):
     app.state.http = httpx2.AsyncClient(base_url="http://ollama", transport=httpx2.MockTransport(handler))
 
 
+def fake_guard(text: str) -> float:
+    """Stands in for the classifier: flags anything containing 'ignore previous'."""
+    return 0.99 if "ignore previous" in text.lower() else 0.01
+
+
+def use_guard(scorer):
+    app.state.guard = scorer
+
+
 @pytest.fixture
 def client():
     # The `with` block runs the app's lifespan, which opens the Redis connection.
     with TestClient(app) as c:
         c.portal.call(app.state.redis.flushdb)
         use_model(fake_ollama)
+        use_guard(fake_guard)
         yield c
 
 

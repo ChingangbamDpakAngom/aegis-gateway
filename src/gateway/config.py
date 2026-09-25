@@ -24,3 +24,10 @@ MODEL = os.getenv("MODEL", "llama3.2")
 MODEL_TIMEOUT_S = float(os.getenv("MODEL_TIMEOUT_S", "60"))
 # Caps the answer length, which caps both latency and cost per request.
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "512"))
+
+# Prompt-injection screening (needs `uv sync --group ml`). Any Hugging Face text
+# classifier with an INJECTION/LABEL_1-style label works; Prompt Guard 2 is gated.
+GUARD_ENABLED = os.getenv("GUARD_ENABLED", "true").lower() == "true"
+GUARD_MODEL = os.getenv("GUARD_MODEL", "protectai/deberta-v3-base-prompt-injection-v2")
+# Messages scoring at or above this injection probability are refused.
+GUARD_THRESHOLD = float(os.getenv("GUARD_THRESHOLD", "0.5"))

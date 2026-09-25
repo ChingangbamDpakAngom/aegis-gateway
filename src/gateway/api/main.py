@@ -1,3 +1,4 @@
+import asyncio
 import math
 from contextlib import asynccontextmanager
 
@@ -14,6 +15,7 @@ from starlette.exceptions import HTTPException
 
 from gateway import config
 from gateway.api.schemas import ChatRequest
+from gateway.core import guard
 from gateway.core.llm import generate
 from gateway.core.rate_limiter import TOKEN_BUCKET_LUA, take_token
 from gateway.keys import key_hash
@@ -35,6 +37,8 @@ async def lifespan(app: FastAPI):
     app.state.http = httpx2.AsyncClient(
         base_url=config.OLLAMA_URL, timeout=httpx2.Timeout(config.MODEL_TIMEOUT_S, connect=2.0)
     )
+    # The classifier takes a few seconds to load, so load it once, here, not per request.
+    app.state.guard = guard.load(config.GUARD_MODEL) if config.GUARD_ENABLED else None
     yield
     await app.state.http.aclose()
     await app.state.redis.aclose()
@@ -158,6 +162,13 @@ async def metrics():
 
 @app.post("/chat")
 async def chat(request: Request, body: ChatRequest, client: dict = Depends(rate_limit)):
+    if request.app.state.guard is not None:
+        # The classifier is CPU-bound; a worker thread keeps the event loop serving others.
+        # ponytail: one request at a time per thread; batch requests if throughput matters.
+        score = await asyncio.to_thread(request.app.state.guard, body.message)
+        request.state.guard_score = round(score, 4)
+        if score >= config.GUARD_THRESHOLD:
+            raise GatewayError(400, "prompt_rejected", "The message looks like a prompt-injection attempt")
     result = await generate(request.app.state.http, body.message)
     request.state.usage = result["usage"]
     return {**result, "client_id": client["client_id"]}

@@ -16,7 +16,7 @@ Control requests today. Build toward safer, more efficient AI systems tomorrow.
 
 Aegis Gateway is being built to sit between users and AI models. Like a checkpoint at a building entrance, it checks incoming requests before they are allowed through. This helps keep an AI application reliable when usage grows and creates one place to add safeguards, caching, and smarter model selection.
 
-> **What works now:** API-key authentication, strict request validation, and per-client Redis rate limiting that fails closed, plus request IDs, JSON request logs, Prometheus metrics and a readiness check. Allowed messages are answered by a local model served by [Ollama](https://ollama.com) (`llama3.2` by default), with token usage reported per request. Prompt screening, caching and routing are planned, not shipped.
+> **What works now:** API-key authentication, strict request validation, and per-client Redis rate limiting that fails closed, plus request IDs, JSON request logs, Prometheus metrics and a readiness check. Allowed messages are answered by a local model served by [Ollama](https://ollama.com) (`llama3.2` by default), with token usage reported per request. Every message is first screened by a prompt-injection classifier. Caching and routing are planned, not shipped.
 
 <p align="center">
   <img src="docs/images/aegis-overview.png" width="720" alt="Aegis Gateway overview: each request is authenticated (401), rate-limited (429) and validated (422) before reaching the LLM; Redis outages fail closed with 503. Phases 0 and 1 are done; phases 2 to 7 are next.">
@@ -47,7 +47,9 @@ flowchart TD
     C -->|"No"| Y["429 rate_limited + Retry-After"]
     C -->|"Yes"| D{"Valid body?<br/>Pydantic"}
     D -->|"No"| Z["422 invalid_request"]
-    D -->|"Yes"| M{"Model answers?<br/>Ollama /api/chat"}
+    D -->|"Yes"| G{"Looks like an injection?<br/>DeBERTa classifier"}
+    G -->|"Yes"| R["400 prompt_rejected"]
+    G -->|"No"| M{"Model answers?<br/>Ollama /api/chat"}
     M -->|"Down / error"| W["502 model_unavailable"]
     M -->|"Too slow"| T["504 model_timeout"]
     M -->|"Yes"| E["200 OK<br/>reply + token usage"]
@@ -62,6 +64,7 @@ flowchart TD
 - Redis runs the token-bucket check and update in one Lua script, so two simultaneous requests cannot spend the same token. The script uses Redis's clock, so every gateway instance agrees on the time.
 - When the bucket is empty, the `429` response carries a `Retry-After` header saying how many seconds to wait.
 - Only requests that pass every check reach the model, so a rejected request costs no inference. Answers are capped at `MAX_OUTPUT_TOKENS` (512). If Ollama is down the gateway returns `502`, and if it's too slow, `504` ([ADR-004](docs/adr/0004-model-backend-ollama.md)).
+- Before the model, each message is scored by a prompt-injection classifier (`protectai/deberta-v3-base-prompt-injection-v2`, swappable for Llama Prompt Guard 2). Scores at or above `GUARD_THRESHOLD` (0.5) are refused with `400 prompt_rejected`. Long messages are scored in 500-token chunks, so an attack can't hide past the classifier's window. On a public benchmark it made **no false positives but caught only 37% of injections**, so it's a tripwire, not a complete defence ([ADR-005](docs/adr/0005-prompt-injection-guard.md)).
 - Prompt and completion tokens are returned in `usage`, written to the log line, and counted in `aegis_llm_tokens_total`.
 - If Redis is unreachable, `/chat` **fails closed** with `503` within about half a second instead of serving requests unchecked ([ADR-001](docs/adr/0001-token-bucket-in-redis-fail-closed.md)).
 
@@ -74,7 +77,8 @@ flowchart TD
 | Docker Compose | Runs Redis for local development | Implemented |
 | uv | Python environment and dependency management | Implemented |
 | pytest and FastAPI TestClient | Basic API tests | Implemented |
-| Llama Prompt Guard 2 | Candidate prompt-injection screening model; access and integration still need to be resolved | Planned |
+| Hugging Face Transformers + DeBERTa-v3 injection classifier | Screens every prompt before the model; `scripts/eval_guard.py` measures it | Implemented |
+| Llama Prompt Guard 2 | Drop-in alternative classifier (gated on Hugging Face; set `GUARD_MODEL`) | Supported, not default |
 | Redis cache | Exact-match response caching | Planned |
 | Ollama (`llama3.2`) + httpx2 | Local model that answers `/chat` after all checks pass | Implemented |
 | Hosted model APIs or vLLM | Additional backends for routing | Planned |
@@ -112,7 +116,7 @@ From a terminal:
 ```bash
 git clone https://github.com/ChingangbamDpakAngom/aegis-gateway.git
 cd aegis-gateway
-uv sync
+uv sync --group ml     # includes PyTorch for the prompt guard; or set GUARD_ENABLED=false and use `uv sync`
 docker compose up -d
 uv run uvicorn gateway.api.main:app --reload
 ```
@@ -170,13 +174,13 @@ docker compose up -d
 uv run pytest -q
 ```
 
-Tests use a fake Ollama (`httpx2.MockTransport`), so neither CI nor you need a model to run them. To also hit the real model, run `AEGIS_LIVE_MODEL=1 uv run pytest -q -k live` with Ollama running.
+Tests use a fake Ollama (`httpx2.MockTransport`), so neither CI nor you need a model to run them. The prompt guard is replaced by a fake scorer the same way, so tests need no PyTorch. To also hit the real models, run `AEGIS_LIVE_MODEL=1 AEGIS_LIVE_GUARD=1 uv run pytest -q -k live` with Ollama running and the `ml` group installed.
 
-Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers API-key authentication (missing, unknown, stored hashed), request validation (empty, oversized, unknown fields), the uniform error format, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, key rotation sharing a bucket, fail-closed behaviour when Redis is down, `/ready` vs `/health`, request-ID handling, the JSON log line, metric labels, the exact request sent to the model, 502/504 on model failures, token accounting, and that rate-limited requests never reach the model. GitHub Actions runs the same suite on every push, with a Redis service container.
+Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers API-key authentication (missing, unknown, stored hashed), request validation (empty, oversized, unknown fields), the uniform error format, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, key rotation sharing a bucket, fail-closed behaviour when Redis is down, `/ready` vs `/health`, request-ID handling, the JSON log line, metric labels, the exact request sent to the model, 502/504 on model failures, token accounting, that rate-limited requests never reach the model, prompt-injection refusals (before any inference), the configurable threshold, and chunked screening of long messages. GitHub Actions runs the same suite on every push, with a Redis service container.
 
-Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (defaults for keys without their own limits), `MAX_MESSAGE_CHARS`, `OLLAMA_URL`, `MODEL`, `MODEL_TIMEOUT_S`, `MAX_OUTPUT_TOKENS` (see [`config.py`](src/gateway/config.py)).
+Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (defaults for keys without their own limits), `MAX_MESSAGE_CHARS`, `OLLAMA_URL`, `MODEL`, `MODEL_TIMEOUT_S`, `MAX_OUTPUT_TOKENS`, `GUARD_ENABLED`, `GUARD_MODEL`, `GUARD_THRESHOLD` (see [`config.py`](src/gateway/config.py)).
 
-PyTorch and Transformers (for prompt screening, Phase 4) are kept out of the default install: `uv sync --group ml`.
+PyTorch and Transformers (for prompt screening) are kept in the optional `ml` group: `uv sync --group ml`. Measure the guard with `uv run --group ml python scripts/eval_guard.py [model]`.
 
 ## Project layout
 
@@ -190,6 +194,7 @@ aegis-gateway/
 │       │   └── schemas.py         # Request-validation models
 │       ├── core/
 │       │   ├── __init__.py
+│       │   ├── guard.py           # Prompt-injection classifier (chunked scoring)
 │       │   ├── llm.py             # Model backend call (Ollama) + token metrics
 │       │   ├── rate_limiter.py    # Redis rate-limit integration
 │       │   └── lua/
@@ -199,6 +204,8 @@ aegis-gateway/
 │       ├── keys.py                # API-key creation CLI + hashing
 │       ├── observability.py       # Request IDs, JSON logs, Prometheus metrics
 │       └── py.typed
+├── scripts/
+│   └── eval_guard.py              # Precision/recall/latency of the guard on a public dataset
 ├── tests/                         # Automated tests (real Redis, DB 15)
 ├── docs/
 │   ├── adr/                       # Architecture Decision Records
@@ -222,7 +229,7 @@ Additional modules will be added as their features are implemented. Experimental
 - [x] Phase 1: hashed API keys, per-client limits, strict request contract, uniform errors ([notes](docs/phases/phase-1.md))
 - [x] Phase 2: readiness check, request IDs, structured logging, Prometheus metrics ([notes](docs/phases/phase-2.md))
 - [x] Phase 3: answer `/chat` with a local model (Ollama), output cap, 502/504 handling, token accounting ([notes](docs/phases/phase-3.md))
-- [ ] Phase 4: evaluate and integrate prompt-injection screening
+- [x] Phase 4: prompt-injection screening before the model, evaluated on a public dataset ([notes](docs/phases/phase-4.md))
 - [ ] Add exact-match caching and model routing
 - [ ] Measure latency and cost under load
 - [ ] Explore semantic caching and observability dashboards
