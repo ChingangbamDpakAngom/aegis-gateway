@@ -16,9 +16,9 @@ LOOKUPS = Counter("aegis_cache_lookups_total", "Cache lookups by result", ["resu
 
 
 def _digest(message: str) -> str:
-    # Whitespace differences don't change the question; the model does change the answer.
+    # Whitespace differences don't change the question; the models do change the answer.
     normalised = " ".join(message.split())
-    return hashlib.sha256(f"{config.MODEL}\n{normalised}".encode()).hexdigest()
+    return hashlib.sha256(f"{config.MODEL}|{config.LARGE_MODEL}\n{normalised}".encode()).hexdigest()
 
 
 def _answer_key(client_id: str, digest: str) -> str:
@@ -26,7 +26,7 @@ def _answer_key(client_id: str, digest: str) -> str:
 
 
 def _vector_key(client_id: str) -> str:
-    return f"semcache:{client_id}:{config.MODEL}:{config.EMBED_MODEL}"
+    return f"semcache:{client_id}:{config.MODEL}|{config.LARGE_MODEL}:{config.EMBED_MODEL}"
 
 
 async def _embed(http: httpx2.AsyncClient, text: str) -> list[float]:

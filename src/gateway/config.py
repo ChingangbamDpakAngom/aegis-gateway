@@ -41,3 +41,10 @@ CACHE_TTL_S = int(os.getenv("CACHE_TTL_S", "3600"))
 SEMANTIC_CACHE = os.getenv("SEMANTIC_CACHE", "false").lower() == "true"
 EMBED_MODEL = os.getenv("EMBED_MODEL", "all-minilm")
 SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.95"))
+
+# Routing: MODEL is the small, fast default; LARGE_MODEL takes long or reasoning-heavy
+# messages. Set LARGE_MODEL="" to always use MODEL. Each is the other's fallback.
+LARGE_MODEL = os.getenv("LARGE_MODEL", "gemma2:9b")
+# gemma2:9b runs ~9x slower than llama3.2 on a 4 GB laptop GPU, so it needs longer.
+LARGE_MODEL_TIMEOUT_S = float(os.getenv("LARGE_MODEL_TIMEOUT_S", "180"))
+ROUTE_LONG_CHARS = int(os.getenv("ROUTE_LONG_CHARS", "1000"))

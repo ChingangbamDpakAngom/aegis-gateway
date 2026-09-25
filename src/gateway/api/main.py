@@ -15,8 +15,7 @@ from starlette.exceptions import HTTPException
 
 from gateway import config
 from gateway.api.schemas import ChatRequest
-from gateway.core import cache, guard
-from gateway.core.llm import generate
+from gateway.core import cache, guard, router
 from gateway.core.rate_limiter import TOKEN_BUCKET_LUA, take_token
 from gateway.keys import key_hash
 from gateway.observability import observe
@@ -180,8 +179,9 @@ async def chat(request: Request, body: ChatRequest, client: dict = Depends(rate_
             return {"reply": hit["reply"], "model": hit["model"], "usage": no_tokens,
                     "cache": hit["cache"], "client_id": client_id}
 
-    result = await generate(http, body.message)
-    request.state.usage = result["usage"]
+    result = await router.complete(http, body.message)
+    request.state.usage, request.state.model = result["usage"], result["model"]
+    request.state.route_reason, request.state.fallback = result["route"], result["fallback"]
     if config.CACHE_ENABLED:
         await cache.store(redis, client_id, body.message, result, vector)
         request.state.cache = "miss"

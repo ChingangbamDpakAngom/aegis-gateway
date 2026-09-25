@@ -8,11 +8,11 @@ from gateway import config
 TOKENS = Counter("aegis_llm_tokens_total", "Tokens processed by the model", ["model", "kind"])
 
 
-async def generate(http: httpx2.AsyncClient, message: str) -> dict:
+async def generate(http: httpx2.AsyncClient, message: str, model: str, timeout_s: float) -> dict:
     # ponytail: one request, one full answer (stream=False). Streaming tokens back
     # (SSE) makes the first word appear sooner; add it when a UI needs it.
-    response = await http.post("/api/chat", json={
-        "model": config.MODEL,
+    response = await http.post("/api/chat", timeout=httpx2.Timeout(timeout_s, connect=2.0), json={
+        "model": model,
         "messages": [{"role": "user", "content": message}],
         "stream": False,
         "options": {"num_predict": config.MAX_OUTPUT_TOKENS},
@@ -25,6 +25,6 @@ async def generate(http: httpx2.AsyncClient, message: str) -> dict:
         "prompt_tokens": data.get("prompt_eval_count", 0),
         "completion_tokens": data.get("eval_count", 0),
     }
-    TOKENS.labels(config.MODEL, "prompt").inc(usage["prompt_tokens"])
-    TOKENS.labels(config.MODEL, "completion").inc(usage["completion_tokens"])
-    return {"reply": data["message"]["content"], "model": config.MODEL, "usage": usage}
+    TOKENS.labels(model, "prompt").inc(usage["prompt_tokens"])
+    TOKENS.labels(model, "completion").inc(usage["completion_tokens"])
+    return {"reply": data["message"]["content"], "model": model, "usage": usage}

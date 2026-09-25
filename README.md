@@ -16,7 +16,7 @@ Control requests today. Build toward safer, more efficient AI systems tomorrow.
 
 Aegis Gateway is being built to sit between users and AI models. Like a checkpoint at a building entrance, it checks incoming requests before they are allowed through. This helps keep an AI application reliable when usage grows and creates one place to add safeguards, caching, and smarter model selection.
 
-> **What works now:** API-key authentication, strict request validation, and per-client Redis rate limiting that fails closed, plus request IDs, JSON request logs, Prometheus metrics and a readiness check. Allowed messages are answered by a local model served by [Ollama](https://ollama.com) (`llama3.2` by default), with token usage reported per request. Every message is first screened by a prompt-injection classifier, and repeated questions are answered from a per-client Redis cache in milliseconds. Model routing is planned, not shipped.
+> **What works now:** API-key authentication, strict request validation, and per-client Redis rate limiting that fails closed, plus request IDs, JSON request logs, Prometheus metrics and a readiness check. Allowed messages are answered by a local model served by [Ollama](https://ollama.com), with token usage reported per request. A rule-based router sends everyday questions to a small fast model (`llama3.2`) and long or reasoning-heavy ones to a larger model (`gemma2:9b`), falling back to the other if one fails. Every message is first screened by a prompt-injection classifier, and repeated questions are answered from a per-client Redis cache in milliseconds.
 
 <p align="center">
   <img src="docs/images/aegis-overview.png" width="720" alt="Aegis Gateway overview: each request is authenticated (401), rate-limited (429) and validated (422) before reaching the LLM; Redis outages fail closed with 503. Phases 0 and 1 are done; phases 2 to 7 are next.">
@@ -51,7 +51,8 @@ flowchart TD
     G -->|"Yes"| R["400 prompt_rejected"]
     G -->|"No"| K{"Asked before?<br/>per-client Redis cache"}
     K -->|"Yes"| H["200 OK<br/>cached reply, 0 tokens"]
-    K -->|"No"| M{"Model answers?<br/>Ollama /api/chat"}
+    K -->|"No"| RT["Router: long / reasoning?<br/>gemma2:9b, else llama3.2"]
+    RT --> M{"Model answers?<br/>(other model on failure)"}
     M -->|"Down / error"| W["502 model_unavailable"]
     M -->|"Too slow"| T["504 model_timeout"]
     M -->|"Yes"| E["200 OK<br/>reply + token usage"]
@@ -66,6 +67,7 @@ flowchart TD
 - Redis runs the token-bucket check and update in one Lua script, so two simultaneous requests cannot spend the same token. The script uses Redis's clock, so every gateway instance agrees on the time.
 - When the bucket is empty, the `429` response carries a `Retry-After` header saying how many seconds to wait.
 - Only requests that pass every check reach the model, so a rejected request costs no inference. Answers are capped at `MAX_OUTPUT_TOKENS` (512). If Ollama is down the gateway returns `502`, and if it's too slow, `504` ([ADR-004](docs/adr/0004-model-backend-ollama.md)).
+- Messages of 1000+ characters, or containing phrases like "step by step", "compare", "debug" or a code block, go to `LARGE_MODEL`. Everything else goes to `MODEL`. If the chosen model errors or times out, the other one answers, and the response and log say so (`route`, `model`, `fallback`). On a laptop, `llama3.2` answers in ~2 s and `gemma2:9b` in ~60 s, so the large model gets its own 180 s timeout ([ADR-007](docs/adr/0007-model-router.md)).
 - Before the model, each message is scored by a prompt-injection classifier (`protectai/deberta-v3-base-prompt-injection-v2`, swappable for Llama Prompt Guard 2). Scores at or above `GUARD_THRESHOLD` (0.5) are refused with `400 prompt_rejected`. Long messages are scored in 500-token chunks, so an attack can't hide past the classifier's window. On a public benchmark it made **no false positives but caught only 37% of injections**, so it's a tripwire, not a complete defence ([ADR-005](docs/adr/0005-prompt-injection-guard.md)).
 - Answers are cached in Redis for `CACHE_TTL_S` (1 hour), **per client**, so one client's answers never reach another. A repeat of the same question (ignoring whitespace) returns in ~11 ms instead of ~2–11 s and costs 0 tokens. The response says `"cache": "exact"` or `"miss"`. A semantic cache (similar meaning, via embeddings and Redis 8 vector sets) is built but **off by default**, because the evaluation showed it returns wrong answers: "10 kilometres to miles" got the cached "10 miles to kilometres" answer ([ADR-006](docs/adr/0006-answer-cache.md)).
 - Prompt and completion tokens are returned in `usage`, written to the log line, and counted in `aegis_llm_tokens_total`.
@@ -85,8 +87,8 @@ flowchart TD
 | Redis cache | Per-client exact-match answer cache with TTL | Implemented |
 | Redis 8 vector sets + Ollama embeddings (`all-minilm`) | Optional semantic cache; `scripts/eval_semantic_cache.py` picks the threshold | Implemented, off by default |
 | Ollama (`llama3.2`) + httpx2 | Local model that answers `/chat` after all checks pass | Implemented |
-| Hosted model APIs or vLLM | Additional backends for routing | Planned |
-| Rule-based router | Select an appropriate model for a request | Planned |
+| Rule-based router with fallback | Picks `llama3.2` or `gemma2:9b` per message; the other is the fallback | Implemented |
+| Hosted model APIs or vLLM | Further backends the router could use | Future exploration |
 | Structured logging (stdlib `logging`, JSON) | One log line per request with request ID and decision | Implemented |
 | Prometheus client | Request counters and latency histograms at `/metrics` | Implemented |
 | OpenTelemetry, Grafana | Distributed tracing and dashboards | Future exploration |
@@ -113,7 +115,7 @@ flowchart TD
 - Python 3.12 or later
 - [uv](https://docs.astral.sh/uv/)
 - Docker Desktop with its engine running
-- [Ollama](https://ollama.com/download) with the default model pulled: `ollama pull llama3.2`
+- [Ollama](https://ollama.com/download) with the models pulled: `ollama pull llama3.2` (required) and `ollama pull gemma2:9b` (the large model; without it, hard questions fall back to `llama3.2`)
 
 From a terminal:
 
@@ -180,9 +182,9 @@ uv run pytest -q
 
 Tests use a fake Ollama (`httpx2.MockTransport`), so neither CI nor you need a model to run them. The prompt guard is replaced by a fake scorer the same way, so tests need no PyTorch. To also hit the real models, run `AEGIS_LIVE_MODEL=1 AEGIS_LIVE_GUARD=1 uv run pytest -q -k live` with Ollama running and the `ml` group installed.
 
-Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers API-key authentication (missing, unknown, stored hashed), request validation (empty, oversized, unknown fields), the uniform error format, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, key rotation sharing a bucket, fail-closed behaviour when Redis is down, `/ready` vs `/health`, request-ID handling, the JSON log line, metric labels, the exact request sent to the model, 502/504 on model failures, token accounting, that rate-limited requests never reach the model, prompt-injection refusals (before any inference), the configurable threshold, chunked screening of long messages, exact cache hits (0 tokens, whitespace-insensitive), per-client cache isolation, cache TTL, and the semantic cache's paraphrase hits, threshold and graceful degradation when the embedding model fails. GitHub Actions runs the same suite on every push, with a Redis service container.
+Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers API-key authentication (missing, unknown, stored hashed), request validation (empty, oversized, unknown fields), the uniform error format, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, key rotation sharing a bucket, fail-closed behaviour when Redis is down, `/ready` vs `/health`, request-ID handling, the JSON log line, metric labels, the exact request sent to the model, 502/504 on model failures, token accounting, that rate-limited requests never reach the model, prompt-injection refusals (before any inference), the configurable threshold, chunked screening of long messages, exact cache hits (0 tokens, whitespace-insensitive), per-client cache isolation, cache TTL, and the semantic cache's paraphrase hits, threshold and graceful degradation when the embedding model fails, the routing rules, per-model timeouts, fallback on error and on timeout, and 502 when every model fails. GitHub Actions runs the same suite on every push, with a Redis service container.
 
-Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (defaults for keys without their own limits), `MAX_MESSAGE_CHARS`, `OLLAMA_URL`, `MODEL`, `MODEL_TIMEOUT_S`, `MAX_OUTPUT_TOKENS`, `GUARD_ENABLED`, `GUARD_MODEL`, `GUARD_THRESHOLD`, `CACHE_ENABLED`, `CACHE_TTL_S`, `SEMANTIC_CACHE`, `EMBED_MODEL`, `SIMILARITY_THRESHOLD` (see [`config.py`](src/gateway/config.py)).
+Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (defaults for keys without their own limits), `MAX_MESSAGE_CHARS`, `OLLAMA_URL`, `MODEL`, `MODEL_TIMEOUT_S`, `MAX_OUTPUT_TOKENS`, `GUARD_ENABLED`, `GUARD_MODEL`, `GUARD_THRESHOLD`, `CACHE_ENABLED`, `CACHE_TTL_S`, `SEMANTIC_CACHE`, `EMBED_MODEL`, `SIMILARITY_THRESHOLD`, `LARGE_MODEL`, `LARGE_MODEL_TIMEOUT_S`, `ROUTE_LONG_CHARS` (see [`config.py`](src/gateway/config.py)).
 
 PyTorch and Transformers (for prompt screening) are kept in the optional `ml` group: `uv sync --group ml`. Measure the guard with `uv run --group ml python scripts/eval_guard.py [model]`.
 
@@ -202,6 +204,7 @@ aegis-gateway/
 │       │   ├── guard.py           # Prompt-injection classifier (chunked scoring)
 │       │   ├── llm.py             # Model backend call (Ollama) + token metrics
 │       │   ├── rate_limiter.py    # Redis rate-limit integration
+│       │   ├── router.py          # Rule-based model choice + fallback
 │       │   └── lua/
 │       │       └── token_bucket.lua
 │       ├── __init__.py
@@ -237,7 +240,7 @@ Additional modules will be added as their features are implemented. Experimental
 - [x] Phase 3: answer `/chat` with a local model (Ollama), output cap, 502/504 handling, token accounting ([notes](docs/phases/phase-3.md))
 - [x] Phase 4: prompt-injection screening before the model, evaluated on a public dataset ([notes](docs/phases/phase-4.md))
 - [x] Phase 5: per-client answer cache; semantic cache evaluated and kept opt-in ([notes](docs/phases/phase-5.md))
-- [ ] Phase 6: rule-based model router with fallback
+- [x] Phase 6: rule-based model router with per-model timeouts and fallback ([notes](docs/phases/phase-6.md))
 - [ ] Phase 7 (v1.0): Docker image and full compose stack, load test, Grafana dashboard
 
 ## Versioning

@@ -37,6 +37,8 @@ def test_chat_with_valid_key(client, new_key):
         "reply": "Hello from the fake model",
         "model": config.MODEL,
         "usage": {"prompt_tokens": 11, "completion_tokens": 5},
+        "route": "default",
+        "fallback": False,
         "cache": "miss",
         "client_id": "alice",
     }
@@ -520,3 +522,82 @@ def test_broken_embedding_model_degrades_to_a_miss(client, new_key, monkeypatch)
 
     assert response.status_code == 200
     assert response.json()["cache"] == "miss"
+
+
+# --- Model routing and fallback ---
+
+
+def model_backend(calls, failing=(), timing_out=()):
+    """Fake Ollama that records which model each call used; some models can fail."""
+    def handler(request):
+        model = json.loads(request.content)["model"]
+        calls.append((model, request.extensions["timeout"]["read"]))
+        if model in failing:
+            return httpx2.Response(404, json={"error": f"model '{model}' not found"})
+        if model in timing_out:
+            raise httpx2.ReadTimeout("too slow")
+        return httpx2.Response(200, json={"message": {"content": f"from {model}"}, "eval_count": 1})
+    return handler
+
+
+def test_router_rules():
+    from gateway.core import router
+
+    small, large = config.MODEL, config.LARGE_MODEL
+    assert router.choose("What is Redis?") == ("default", [(small, config.MODEL_TIMEOUT_S), (large, config.LARGE_MODEL_TIMEOUT_S)])
+    assert router.choose("Explain step by step how TCP works")[0] == "hard_hint"
+    assert router.choose("x" * config.ROUTE_LONG_CHARS)[0] == "long"
+    assert router.choose("Please debug this")[1][0][0] == large
+
+
+def test_routing_can_be_turned_off(monkeypatch):
+    from gateway.core import router
+
+    monkeypatch.setattr(config, "LARGE_MODEL", "")
+
+    assert router.choose("Explain step by step") == ("single_model", [(config.MODEL, config.MODEL_TIMEOUT_S)])
+
+
+def test_hard_question_goes_to_large_model_with_its_own_timeout(client, new_key):
+    calls = []
+    use_model(model_backend(calls))
+
+    response = chat(client, new_key(), message="Compare Redis and Memcached")
+
+    assert calls == [(config.LARGE_MODEL, config.LARGE_MODEL_TIMEOUT_S)]
+    assert response.json()["model"] == config.LARGE_MODEL
+    assert response.json()["route"] == "hard_hint"
+
+
+def test_falls_back_when_chosen_model_fails(client, new_key, caplog):
+    calls = []
+    use_model(model_backend(calls, failing={config.LARGE_MODEL}))
+
+    response = chat(client, new_key(), message="Explain step by step how a hash works")
+
+    assert [model for model, _ in calls] == [config.LARGE_MODEL, config.MODEL]
+    assert response.status_code == 200
+    assert response.json()["reply"] == f"from {config.MODEL}"
+    assert response.json()["fallback"] is True
+    [record] = [r for r in caplog.records if r.name == "aegis"]
+    line = json.loads(record.getMessage())
+    assert (line["route_reason"], line["model"], line["fallback"]) == ("hard_hint", config.MODEL, True)
+
+
+def test_falls_back_when_chosen_model_times_out(client, new_key):
+    use_model(model_backend([], timing_out={config.MODEL}))
+
+    response = chat(client, new_key(), message="What is Redis?")
+
+    assert response.json()["model"] == config.LARGE_MODEL
+    assert response.json()["fallback"] is True
+
+
+def test_every_model_failing_is_still_502(client, new_key):
+    calls = []
+    use_model(model_backend(calls, failing={config.MODEL, config.LARGE_MODEL}))
+
+    response = chat(client, new_key(), message="What is Redis?")
+
+    assert response.status_code == 502
+    assert len(calls) == 2
