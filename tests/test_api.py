@@ -1,3 +1,4 @@
+import json
 import time
 
 from gateway import config
@@ -160,3 +161,80 @@ def test_redis_down_fails_closed(monkeypatch):
 
     assert response.status_code == 503
     assert error_code(response) == "backend_unavailable"
+
+
+# --- Observability ---
+
+
+def test_ready_when_redis_is_up(client):
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+
+
+def test_not_ready_when_redis_is_down(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from gateway.api.main import app
+
+    monkeypatch.setattr(config, "REDIS_URL", "redis://localhost:1/0")
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200  # alive...
+        response = client.get("/ready")  # ...but not able to serve
+
+    assert response.status_code == 503
+    assert error_code(response) == "backend_unavailable"
+
+
+def test_every_response_has_a_request_id(client):
+    first, second = client.get("/health"), client.get("/nope")
+
+    assert len(first.headers["X-Request-ID"]) == 32
+    assert first.headers["X-Request-ID"] != second.headers["X-Request-ID"]
+
+
+def test_safe_incoming_request_id_is_reused(client):
+    response = client.get("/health", headers={"X-Request-ID": "trace-abc.123"})
+
+    assert response.headers["X-Request-ID"] == "trace-abc.123"
+
+
+def test_unsafe_incoming_request_id_is_replaced(client):
+    response = client.get("/health", headers={"X-Request-ID": 'x"}, "status": 200'})
+
+    assert response.headers["X-Request-ID"] != 'x"}, "status": 200'
+
+
+def test_one_json_log_line_per_request(client, new_key, caplog):
+    key = new_key("alice", capacity=1)
+    chat(client, key)
+    caplog.clear()
+
+    response = chat(client, key)  # rate limited
+
+    [record] = [r for r in caplog.records if r.name == "aegis"]
+    line = json.loads(record.getMessage())
+    assert line["request_id"] == response.headers["X-Request-ID"]
+    assert line["route"] == "/chat"
+    assert line["status"] == 429
+    assert line["error_code"] == "rate_limited"
+    assert line["client_id"] == "alice"
+    assert key not in record.getMessage()
+
+
+def test_metrics_count_requests_by_route_and_status(client):
+    from prometheus_client import REGISTRY
+
+    def count():
+        labels = {"route": "unmatched", "status": "404"}
+        return REGISTRY.get_sample_value("aegis_requests_total", labels) or 0
+
+    before = count()
+    client.get("/scanner/probe/1")
+    client.get("/scanner/probe/2")
+
+    assert count() == before + 2
+    body = client.get("/metrics").text
+    assert "aegis_request_duration_seconds_bucket" in body
+    assert "/scanner/probe" not in body  # raw paths never become labels

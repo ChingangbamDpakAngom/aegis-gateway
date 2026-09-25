@@ -3,8 +3,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request, Security
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.security import APIKeyHeader
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from starlette.exceptions import HTTPException
@@ -13,6 +14,7 @@ from gateway import config
 from gateway.api.schemas import ChatRequest
 from gateway.core.rate_limiter import TOKEN_BUCKET_LUA, take_token
 from gateway.keys import key_hash
+from gateway.observability import observe
 
 
 @asynccontextmanager
@@ -30,6 +32,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Aegis Gateway", lifespan=lifespan)
+app.middleware("http")(observe)
 
 
 # --- Errors: every failure has the same shape, {"error": {"code", "message"}} ---
@@ -41,7 +44,10 @@ class GatewayError(HTTPException):
         self.code = code
 
 
-def error_response(status_code: int, code: str, message: str, headers=None, **extra) -> JSONResponse:
+def error_response(
+    request: Request, status_code: int, code: str, message: str, headers=None, **extra
+) -> JSONResponse:
+    request.state.error_code = code  # picked up by the request log line
     return JSONResponse(
         status_code=status_code,
         content={"error": {"code": code, "message": message, **extra}},
@@ -53,7 +59,7 @@ def error_response(status_code: int, code: str, message: str, headers=None, **ex
 async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
     # Also catches FastAPI's own errors (404 unknown route, 405 wrong method).
     code = getattr(exc, "code", "http_error")
-    return error_response(exc.status_code, code, str(exc.detail), exc.headers)
+    return error_response(request, exc.status_code, code, str(exc.detail), exc.headers)
 
 
 @app.exception_handler(RequestValidationError)
@@ -62,14 +68,14 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
         {"field": ".".join(str(p) for p in e["loc"][1:]), "message": e["msg"]}
         for e in exc.errors()
     ]
-    return error_response(422, "invalid_request", "Request body is invalid", details=details)
+    return error_response(request, 422, "invalid_request", "Request body is invalid", details=details)
 
 
 @app.exception_handler(RedisError)
 async def redis_unavailable(request: Request, exc: RedisError) -> JSONResponse:
     # Fail closed: without Redis neither keys nor limits can be checked, so refuse
     # traffic rather than let it through unchecked.
-    return error_response(503, "backend_unavailable", "Gateway backend unavailable, retry shortly")
+    return error_response(request, 503, "backend_unavailable", "Gateway backend unavailable, retry shortly")
 
 
 # --- Dependencies: who is calling, and are they within their limit? ---
@@ -83,6 +89,7 @@ async def authenticate(request: Request, api_key: str | None = Security(api_key_
     record = await request.app.state.redis.hgetall(f"apikey:{key_hash(api_key)}")
     if not record:
         raise GatewayError(401, "invalid_api_key", "API key is not valid")
+    request.state.client_id = record["client_id"]
     return record
 
 
@@ -108,7 +115,24 @@ async def rate_limit(request: Request, client: dict = Depends(authenticate)) -> 
 
 @app.get("/health")
 async def health_check():
+    # Liveness: the process is up. Deliberately doesn't touch Redis, so a Redis
+    # outage doesn't get healthy gateway processes restarted.
     return {"status": "OK"}
+
+
+@app.get("/ready")
+async def readiness_check(request: Request):
+    # Readiness: can this instance serve /chat right now? A Redis failure becomes
+    # 503 backend_unavailable via the handler above, so load balancers skip us.
+    await request.app.state.redis.ping()
+    return {"status": "ready"}
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics():
+    # ponytail: unauthenticated, like most Prometheus targets; keep it on an
+    # internal network, or put it behind its own port/auth before exposing the gateway.
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/chat")

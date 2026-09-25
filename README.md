@@ -16,7 +16,7 @@ Control requests today. Build toward safer, more efficient AI systems tomorrow.
 
 Aegis Gateway is being built to sit between users and AI models. Like a checkpoint at a building entrance, it checks incoming requests before they are allowed through. This helps keep an AI application reliable when usage grows and creates one place to add safeguards, caching, and smarter model selection.
 
-> **What works now:** API-key authentication, strict request validation, and per-client Redis rate limiting that fails closed. The `/chat` endpoint currently echoes an allowed message; it does **not** call an AI model yet. Prompt screening, caching, routing, and observability are planned, not shipped.
+> **What works now:** API-key authentication, strict request validation, and per-client Redis rate limiting that fails closed, plus request IDs, JSON request logs, Prometheus metrics and a readiness check. The `/chat` endpoint currently echoes an allowed message; it does **not** call an AI model yet. Prompt screening, caching and routing are planned, not shipped.
 
 <p align="center">
   <img src="docs/images/aegis-overview.png" width="720" alt="Aegis Gateway overview: each request is authenticated (401), rate-limited (429) and validated (422) before reaching the LLM; Redis outages fail closed with 503. Phases 0 and 1 are done; phases 2 to 7 are next.">
@@ -50,7 +50,9 @@ flowchart TD
     D -->|"Yes"| E["200 OK<br/>Echo the message"]
 ```
 
-- `/health` reports whether the API process is running.
+- `/health` reports whether the API process is running. `/ready` also checks Redis and returns `503` if this instance can't serve ([ADR-003](docs/adr/0003-observability-logs-metrics.md)).
+- Every response carries an `X-Request-ID`, and every request writes one JSON log line (`request_id`, `route`, `status`, `error_code`, `client_id`, `duration_ms`). API keys and messages are never logged.
+- `/metrics` exposes Prometheus counters and latency histograms per route.
 - `/chat` requires an `X-API-Key` header and a body of exactly `{"message": "..."}` (1–4000 characters; unknown fields are rejected). Identity comes from the key, never from the body ([ADR-002](docs/adr/0002-api-key-identity.md)).
 - Keys are stored only as SHA-256 hashes. Each client has its own bucket (default capacity 10, refill 1 token/s), and a key can carry its own limits. Keys of the same client share a bucket, so rotating a key doesn't reset the limit.
 - Every error has the same shape: `{"error": {"code": "...", "message": "..."}}`.
@@ -71,8 +73,9 @@ flowchart TD
 | Redis cache | Exact-match response caching | Planned |
 | Local model runtime, such as vLLM, and/or model APIs | Generate answers after checks; provider choice is not final | Planned |
 | Rule-based router | Select an appropriate model for a request | Planned |
-| Structured logging | Track gateway decisions and errors | Planned |
-| OpenTelemetry, Prometheus, Grafana | Deeper tracing, metrics, and dashboards | Future exploration |
+| Structured logging (stdlib `logging`, JSON) | One log line per request with request ID and decision | Implemented |
+| Prometheus client | Request counters and latency histograms at `/metrics` | Implemented |
+| OpenTelemetry, Grafana | Distributed tracing and dashboards | Future exploration |
 
 ## Planned gateway flow
 
@@ -160,7 +163,7 @@ docker compose up -d
 uv run pytest -q
 ```
 
-Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers API-key authentication (missing, unknown, stored hashed), request validation (empty, oversized, unknown fields), the uniform error format, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, key rotation sharing a bucket, and fail-closed behaviour when Redis is down. GitHub Actions runs the same suite on every push, with a Redis service container.
+Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers API-key authentication (missing, unknown, stored hashed), request validation (empty, oversized, unknown fields), the uniform error format, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, key rotation sharing a bucket, fail-closed behaviour when Redis is down, `/ready` vs `/health`, request-ID handling, the JSON log line, and metric labels. GitHub Actions runs the same suite on every push, with a Redis service container.
 
 Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (defaults for keys without their own limits), `MAX_MESSAGE_CHARS` (see [`config.py`](src/gateway/config.py)).
 
@@ -184,6 +187,7 @@ aegis-gateway/
 │       ├── __init__.py
 │       ├── config.py              # Settings from environment variables
 │       ├── keys.py                # API-key creation CLI + hashing
+│       ├── observability.py       # Request IDs, JSON logs, Prometheus metrics
 │       └── py.typed
 ├── tests/                         # Automated tests (real Redis, DB 15)
 ├── docs/
@@ -206,7 +210,7 @@ Additional modules will be added as their features are implemented. Experimental
 - [x] Add basic API tests and verify the `429` path manually
 - [x] Phase 0: async Redis, env config, fail-closed limiter, deterministic tests, CI ([notes](docs/phases/phase-0.md))
 - [x] Phase 1: hashed API keys, per-client limits, strict request contract, uniform errors ([notes](docs/phases/phase-1.md))
-- [ ] Phase 2: readiness checking, request IDs, structured logging, metrics
+- [x] Phase 2: readiness check, request IDs, structured logging, Prometheus metrics ([notes](docs/phases/phase-2.md))
 - [ ] Evaluate and integrate prompt-injection screening
 - [ ] Add exact-match caching and model routing
 - [ ] Connect an AI model and measure latency and cost
