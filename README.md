@@ -176,7 +176,7 @@ Tests run against a real Redis, using database 15 (flushed before each test) so 
 
 Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (defaults for keys without their own limits), `MAX_MESSAGE_CHARS`, `OLLAMA_URL`, `MODEL`, `MODEL_TIMEOUT_S`, `MAX_OUTPUT_TOKENS` (see [`config.py`](src/gateway/config.py)).
 
-The Prompt Guard experiment needs PyTorch, which is kept out of the default install: `uv sync --group ml`.
+PyTorch and Transformers (for prompt screening, Phase 4) are kept out of the default install: `uv sync --group ml`.
 
 ## Project layout
 
