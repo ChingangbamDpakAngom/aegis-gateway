@@ -1,0 +1,60 @@
+{
+  "uid": "aegis",
+  "title": "Aegis Gateway",
+  "schemaVersion": 39,
+  "time": {"from": "now-15m", "to": "now"},
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "/chat requests per second, by status",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": [{"refId": "A", "expr": "sum by (status) (rate(aegis_requests_total{route=\"/chat\"}[1m]))", "legendFormat": "{{status}}"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "/chat latency (p50 / p95)",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.5, sum by (le) (rate(aegis_request_duration_seconds_bucket{route=\"/chat\"}[1m])))", "legendFormat": "p50"},
+        {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(aegis_request_duration_seconds_bucket{route=\"/chat\"}[1m])))", "legendFormat": "p95"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "id": 3, "type": "stat", "title": "Cache hit rate",
+      "gridPos": {"x": 0, "y": 8, "w": 6, "h": 6},
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": [{"refId": "A", "expr": "sum(increase(aegis_cache_lookups_total{result=~\"exact|semantic\"}[$__range])) / sum(increase(aegis_cache_lookups_total[$__range]))"}],
+      "options": {"graphMode": "none"},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 0}, "overrides": []}
+    },
+    {
+      "id": 4, "type": "stat", "title": "Refused",
+      "gridPos": {"x": 6, "y": 8, "w": 6, "h": 6},
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": [
+        {"refId": "A", "expr": "sum(increase(aegis_requests_total{route=\"/chat\",status=\"429\"}[$__range])) or vector(0)", "legendFormat": "rate limited (429)"},
+        {"refId": "B", "expr": "sum(increase(aegis_requests_total{route=\"/chat\",status=\"400\"}[$__range])) or vector(0)", "legendFormat": "injection blocked (400)"},
+        {"refId": "C", "expr": "sum(increase(aegis_requests_total{route=\"/chat\",status=\"401\"}[$__range])) or vector(0)", "legendFormat": "bad key (401)"}
+      ],
+      "options": {"textMode": "value_and_name", "graphMode": "none"},
+      "fieldConfig": {"defaults": {"decimals": 0}, "overrides": []}
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Tokens per second, by model",
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 6},
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": [{"refId": "A", "expr": "sum by (model, kind) (rate(aegis_llm_tokens_total[1m]))", "legendFormat": "{{model}} {{kind}}"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Model calls by route, model and outcome",
+      "gridPos": {"x": 0, "y": 14, "w": 24, "h": 7},
+      "datasource": {"type": "prometheus", "uid": "prom"},
+      "targets": [{"refId": "A", "expr": "sum by (reason, model, outcome) (rate(aegis_route_total[1m]))", "legendFormat": "{{reason}} → {{model}} ({{outcome}})"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    }
+  ]
+}

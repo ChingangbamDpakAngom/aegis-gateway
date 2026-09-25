@@ -179,9 +179,21 @@ async def chat(request: Request, body: ChatRequest, client: dict = Depends(rate_
             return {"reply": hit["reply"], "model": hit["model"], "usage": no_tokens,
                     "cache": hit["cache"], "client_id": client_id}
 
-    result = await router.complete(http, body.message)
-    request.state.usage, request.state.model = result["usage"], result["model"]
-    request.state.route_reason, request.state.fallback = result["route"], result["fallback"]
+    if config.CACHE_ENABLED:
+        # Identical questions arriving together share one model call (see cache.single_flight).
+        result, leader = await cache.single_flight(
+            f"{client_id}:{cache.digest(body.message)}", lambda: router.complete(http, body.message)
+        )
+    else:
+        result, leader = await router.complete(http, body.message), True
+    request.state.model, request.state.route_reason = result["model"], result["route"]
+    request.state.fallback = result["fallback"]
+    if not leader:
+        request.state.cache = "coalesced"
+        no_tokens = {"prompt_tokens": 0, "completion_tokens": 0}
+        return {**result, "usage": no_tokens, "cache": "coalesced", "client_id": client_id}
+
+    request.state.usage = result["usage"]
     if config.CACHE_ENABLED:
         await cache.store(redis, client_id, body.message, result, vector)
         request.state.cache = "miss"

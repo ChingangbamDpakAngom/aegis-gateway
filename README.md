@@ -6,7 +6,7 @@
 
 Control requests today. Build toward safer, more efficient AI systems tomorrow.
 
-![Status: v0.1.0 MVP](https://img.shields.io/badge/status-v0.1.0%20MVP-243B53?style=flat-square)
+![Status: v1.0.0](https://img.shields.io/badge/status-v1.0.0-243B53?style=flat-square)
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![CI](https://github.com/ChingangbamDpakAngom/aegis-gateway/actions/workflows/ci.yml/badge.svg)
 
@@ -19,7 +19,7 @@ Aegis Gateway is being built to sit between users and AI models. Like a checkpoi
 > **What works now:** API-key authentication, strict request validation, and per-client Redis rate limiting that fails closed, plus request IDs, JSON request logs, Prometheus metrics and a readiness check. Allowed messages are answered by a local model served by [Ollama](https://ollama.com), with token usage reported per request. A rule-based router sends everyday questions to a small fast model (`llama3.2`) and long or reasoning-heavy ones to a larger model (`gemma2:9b`), falling back to the other if one fails. Every message is first screened by a prompt-injection classifier, and repeated questions are answered from a per-client Redis cache in milliseconds.
 
 <p align="center">
-  <img src="docs/images/aegis-overview.png" width="720" alt="Aegis Gateway overview: each request is authenticated (401), rate-limited (429) and validated (422) before reaching the LLM; Redis outages fail closed with 503. Phases 0 and 1 are done; phases 2 to 7 are next.">
+  <img src="docs/images/aegis-overview.png" width="720" alt="Aegis Gateway overview: each request is authenticated (401), rate-limited (429), validated (422) and screened for prompt injection (400), then served from the per-client cache or routed to llama3.2 or gemma2:9b with fallback (502/504). Redis outages fail closed with 503. All eight phases are shipped.">
 </p>
 
 ## Why it matters
@@ -69,7 +69,7 @@ flowchart TD
 - Only requests that pass every check reach the model, so a rejected request costs no inference. Answers are capped at `MAX_OUTPUT_TOKENS` (512). If Ollama is down the gateway returns `502`, and if it's too slow, `504` ([ADR-004](docs/adr/0004-model-backend-ollama.md)).
 - Messages of 1000+ characters, or containing phrases like "step by step", "compare", "debug" or a code block, go to `LARGE_MODEL`. Everything else goes to `MODEL`. If the chosen model errors or times out, the other one answers, and the response and log say so (`route`, `model`, `fallback`). On a laptop, `llama3.2` answers in ~2 s and `gemma2:9b` in ~60 s, so the large model gets its own 180 s timeout ([ADR-007](docs/adr/0007-model-router.md)).
 - Before the model, each message is scored by a prompt-injection classifier (`protectai/deberta-v3-base-prompt-injection-v2`, swappable for Llama Prompt Guard 2). Scores at or above `GUARD_THRESHOLD` (0.5) are refused with `400 prompt_rejected`. Long messages are scored in 500-token chunks, so an attack can't hide past the classifier's window. On a public benchmark it made **no false positives but caught only 37% of injections**, so it's a tripwire, not a complete defence ([ADR-005](docs/adr/0005-prompt-injection-guard.md)).
-- Answers are cached in Redis for `CACHE_TTL_S` (1 hour), **per client**, so one client's answers never reach another. A repeat of the same question (ignoring whitespace) returns in ~11 ms instead of ~2–11 s and costs 0 tokens. The response says `"cache": "exact"` or `"miss"`. A semantic cache (similar meaning, via embeddings and Redis 8 vector sets) is built but **off by default**, because the evaluation showed it returns wrong answers: "10 kilometres to miles" got the cached "10 miles to kilometres" answer ([ADR-006](docs/adr/0006-answer-cache.md)).
+- Answers are cached in Redis for `CACHE_TTL_S` (1 hour), **per client**, so one client's answers never reach another. A repeat of the same question (ignoring whitespace) returns in ~11 ms instead of ~2–11 s and costs 0 tokens. The response says `"cache": "exact"`, `"miss"` or `"coalesced"`: identical questions arriving together share one model call instead of each making their own. A semantic cache (similar meaning, via embeddings and Redis 8 vector sets) is built but **off by default**, because the evaluation showed it returns wrong answers: "10 kilometres to miles" got the cached "10 miles to kilometres" answer ([ADR-006](docs/adr/0006-answer-cache.md)).
 - Prompt and completion tokens are returned in `usage`, written to the log line, and counted in `aegis_llm_tokens_total`.
 - If Redis is unreachable, `/chat` **fails closed** with `503` within about half a second instead of serving requests unchecked ([ADR-001](docs/adr/0001-token-bucket-in-redis-fail-closed.md)).
 
@@ -79,7 +79,7 @@ flowchart TD
 |---|---|---|
 | Python, FastAPI, Pydantic | API endpoints and request validation | Implemented |
 | Redis and Lua scripting | Shared token-bucket rate limiting | Implemented |
-| Docker Compose | Runs Redis for local development | Implemented |
+| Docker and Docker Compose | Gateway image (non-root) and a one-command stack: gateway, Redis, Prometheus, Grafana | Implemented |
 | uv | Python environment and dependency management | Implemented |
 | pytest and FastAPI TestClient | Basic API tests | Implemented |
 | Hugging Face Transformers + DeBERTa-v3 injection classifier | Screens every prompt before the model; `scripts/eval_guard.py` measures it | Implemented |
@@ -91,22 +91,28 @@ flowchart TD
 | Hosted model APIs or vLLM | Further backends the router could use | Future exploration |
 | Structured logging (stdlib `logging`, JSON) | One log line per request with request ID and decision | Implemented |
 | Prometheus client | Request counters and latency histograms at `/metrics` | Implemented |
-| OpenTelemetry, Grafana | Distributed tracing and dashboards | Future exploration |
+| Prometheus + Grafana | Scraping and a provisioned dashboard (`ops/`) | Implemented |
+| OpenTelemetry | Distributed tracing across gateway and model | Future exploration |
 
-## Planned gateway flow
+## Performance
 
-This is the intended direction, not a claim about current functionality.
+Load-tested with [`scripts/load_test.py`](scripts/load_test.py) against the full Docker stack. Setup: laptop (RTX 3050, 4 GB), Docker Desktop on Windows, one uvicorn worker, prompt guard off, Ollama on the host.
 
-```mermaid
-flowchart TD
-    A["Incoming request"] --> B["Validate"]
-    B --> C["Rate limit"]
-    C --> D["Screen suspicious prompts"]
-    D --> E["Check answer cache"]
-    E -->|"Hit"| F["Return cached answer"]
-    E -->|"Miss"| G["Choose model"]
-    G --> H["Generate and return answer"]
-```
+| Scenario | Requests | Concurrency | Throughput | p50 | p95 | p99 | Result |
+|---|---|---|---|---|---|---|---|
+| **cached**: same question every time (gateway overhead only) | 2000 | 20 | 246 req/s | 73 ms | 109 ms | 151 ms | all `200` |
+| **ratelimit**: one key with 10 tokens, +1/s | 200 | 20 | 61 req/s | 52 ms | 3.1 s | 3.2 s | 11 × `200`, 189 × `429`; **1** model call, 10 shared |
+| **model**: a new question every time | 12 | 4 | 0.9 req/s | 3.0 s | 6.7 s | 7.0 s | all `200` |
+
+The load test found a real bug. Before [request coalescing](docs/adr/0008-packaging-and-load-testing.md), the 11 allowed requests in the *ratelimit* run all missed the cache at once and queued 11 model calls, giving a p95 of 12.4 s. Now identical requests in flight share one call. The *model* row is bounded by the laptop GPU, not by the gateway.
+
+### Dashboard
+
+`docker compose --profile stack up` starts Prometheus and a provisioned Grafana dashboard at http://localhost:3000. This screenshot is from a mixed-traffic run with the guard on:
+
+<p align="center">
+  <img src="docs/images/grafana-dashboard.png" width="900" alt="Grafana dashboard: requests per second by status, p50/p95 latency, 57% cache hit rate, 50 rate-limited, 3 injections blocked, 3 bad keys, tokens per second by model, and model calls by route.">
+</p>
 
 ## Run locally
 
@@ -117,11 +123,20 @@ flowchart TD
 - Docker Desktop with its engine running
 - [Ollama](https://ollama.com/download) with the models pulled: `ollama pull llama3.2` (required) and `ollama pull gemma2:9b` (the large model; without it, hard questions fall back to `llama3.2`)
 
-From a terminal:
+**Everything in Docker** (gateway, Redis, Prometheus, Grafana; Ollama stays on the host for the GPU):
 
 ```bash
 git clone https://github.com/ChingangbamDpakAngom/aegis-gateway.git
 cd aegis-gateway
+docker compose --profile stack up -d --build                   # add WITH_GUARD=true for the prompt guard (image 372 MB -> 3 GB)
+docker compose exec gateway python -m gateway.keys my-app      # prints your API key
+```
+
+The API is at http://localhost:8000/docs, Prometheus at http://localhost:9090, Grafana at http://localhost:3000.
+
+**For development** (gateway on your machine, Redis in Docker):
+
+```bash
 uv sync --group ml     # includes PyTorch for the prompt guard; or set GUARD_ENABLED=false and use `uv sync`
 docker compose up -d
 uv run uvicorn gateway.api.main:app --reload
@@ -182,7 +197,7 @@ uv run pytest -q
 
 Tests use a fake Ollama (`httpx2.MockTransport`), so neither CI nor you need a model to run them. The prompt guard is replaced by a fake scorer the same way, so tests need no PyTorch. To also hit the real models, run `AEGIS_LIVE_MODEL=1 AEGIS_LIVE_GUARD=1 uv run pytest -q -k live` with Ollama running and the `ml` group installed.
 
-Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers API-key authentication (missing, unknown, stored hashed), request validation (empty, oversized, unknown fields), the uniform error format, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, key rotation sharing a bucket, fail-closed behaviour when Redis is down, `/ready` vs `/health`, request-ID handling, the JSON log line, metric labels, the exact request sent to the model, 502/504 on model failures, token accounting, that rate-limited requests never reach the model, prompt-injection refusals (before any inference), the configurable threshold, chunked screening of long messages, exact cache hits (0 tokens, whitespace-insensitive), per-client cache isolation, cache TTL, and the semantic cache's paraphrase hits, threshold and graceful degradation when the embedding model fails, the routing rules, per-model timeouts, fallback on error and on timeout, and 502 when every model fails. GitHub Actions runs the same suite on every push, with a Redis service container.
+Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers API-key authentication (missing, unknown, stored hashed), request validation (empty, oversized, unknown fields), the uniform error format, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, key rotation sharing a bucket, fail-closed behaviour when Redis is down, `/ready` vs `/health`, request-ID handling, the JSON log line, metric labels, the exact request sent to the model, 502/504 on model failures, token accounting, that rate-limited requests never reach the model, prompt-injection refusals (before any inference), the configurable threshold, chunked screening of long messages, exact cache hits (0 tokens, whitespace-insensitive), per-client cache isolation, cache TTL, and the semantic cache's paraphrase hits, threshold and graceful degradation when the embedding model fails, the routing rules, per-model timeouts, fallback on error and on timeout, 502 when every model fails, and request coalescing. GitHub Actions runs the same suite on every push, with a Redis service container, and also builds the Docker image.
 
 Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (defaults for keys without their own limits), `MAX_MESSAGE_CHARS`, `OLLAMA_URL`, `MODEL`, `MODEL_TIMEOUT_S`, `MAX_OUTPUT_TOKENS`, `GUARD_ENABLED`, `GUARD_MODEL`, `GUARD_THRESHOLD`, `CACHE_ENABLED`, `CACHE_TTL_S`, `SEMANTIC_CACHE`, `EMBED_MODEL`, `SIMILARITY_THRESHOLD`, `LARGE_MODEL`, `LARGE_MODEL_TIMEOUT_S`, `ROUTE_LONG_CHARS` (see [`config.py`](src/gateway/config.py)).
 
@@ -214,13 +229,16 @@ aegis-gateway/
 │       └── py.typed
 ├── scripts/
 │   ├── eval_guard.py              # Precision/recall/latency of the guard on a public dataset
-│   └── eval_semantic_cache.py     # Chooses (or rejects) a semantic-cache threshold
+│   ├── eval_semantic_cache.py     # Chooses (or rejects) a semantic-cache threshold
+│   └── load_test.py               # Throughput / latency under concurrent load
 ├── tests/                         # Automated tests (real Redis, DB 15)
 ├── docs/
 │   ├── adr/                       # Architecture Decision Records
 │   └── phases/                    # Per-phase design + study notes
 ├── .github/workflows/ci.yml       # Tests on every push
-├── docker-compose.yml             # Local Redis service
+├── ops/                           # Prometheus config + Grafana datasource and dashboard
+├── Dockerfile                     # Gateway image (optional CPU-only guard)
+├── docker-compose.yml             # Redis; `--profile stack` adds gateway, Prometheus, Grafana
 ├── pyproject.toml                 # Project configuration and dependencies
 ├── uv.lock                        # Locked dependency versions
 ├── .gitignore
@@ -241,8 +259,8 @@ Additional modules will be added as their features are implemented. Experimental
 - [x] Phase 4: prompt-injection screening before the model, evaluated on a public dataset ([notes](docs/phases/phase-4.md))
 - [x] Phase 5: per-client answer cache; semantic cache evaluated and kept opt-in ([notes](docs/phases/phase-5.md))
 - [x] Phase 6: rule-based model router with per-model timeouts and fallback ([notes](docs/phases/phase-6.md))
-- [ ] Phase 7 (v1.0): Docker image and full compose stack, load test, Grafana dashboard
+- [x] Phase 7 (v1.0): Docker image, one-command compose stack, load test (and a request-coalescing fix it prompted), Grafana dashboard ([notes](docs/phases/phase-7.md))
 
 ## Versioning
 
-`v0.1.0` marks the working validation and rate-limiting foundation. The roadmap is a plan, not a list of released features.
+`v0.1.0` marked the validation and rate-limiting foundation. **`v1.0.0`** is the complete gateway: identity, rate limits, observability, a local LLM, prompt screening, caching, routing with fallback, and a load-tested Docker stack. Next ideas (not promises): OpenTelemetry tracing, token-based budgets per client, streaming responses, a learned router.

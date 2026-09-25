@@ -601,3 +601,26 @@ def test_every_model_failing_is_still_502(client, new_key):
 
     assert response.status_code == 502
     assert len(calls) == 2
+
+
+def test_identical_concurrent_misses_share_one_model_call():
+    import asyncio
+
+    from gateway.core import cache
+
+    calls = []
+
+    async def slow_model():
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return {"reply": "ok"}
+
+    async def five_at_once():
+        return await asyncio.gather(*(cache.single_flight("alice:q", slow_model) for _ in range(5)))
+
+    results = asyncio.run(five_at_once())
+
+    assert calls == [1]
+    assert all(result == {"reply": "ok"} for result, _ in results)
+    assert [leader for _, leader in results].count(True) == 1
+    assert cache._in_flight == {}  # cleaned up, so the next miss calls the model again

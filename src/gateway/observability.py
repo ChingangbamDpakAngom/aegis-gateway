@@ -18,7 +18,13 @@ _handler.setFormatter(logging.Formatter("%(message)s"))
 log.addHandler(_handler)
 
 REQUESTS = Counter("aegis_requests_total", "Requests handled", ["route", "status"])
-LATENCY = Histogram("aegis_request_duration_seconds", "Time to handle a request", ["route"])
+# Start the expected series at 0. A series that first appears already at 3 (three 400s
+# inside one scrape) shows no increase to rate()/increase(), so the dashboard reads 0.
+for _status in ("200", "400", "401", "422", "429", "502", "503", "504"):
+    REQUESTS.labels("/chat", _status)
+# The default buckets stop at 10 s; LLM calls take minutes on a laptop, so p95 would be capped.
+LATENCY = Histogram("aegis_request_duration_seconds", "Time to handle a request", ["route"],
+                    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300))
 
 # A caller-supplied ID is only reused if it is short and plain; anything else could
 # forge log lines or bloat the logs, so a fresh ID replaces it.

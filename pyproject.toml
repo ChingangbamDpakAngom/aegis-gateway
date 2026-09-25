@@ -1,6 +1,6 @@
 [project]
 name = "gateway"
-version = "0.1.0"
+version = "1.0.0"
 description = "An API gateway that screens, rate-limits and routes requests to LLMs"
 readme = "README.md"
 authors = [

@@ -1,5 +1,57 @@
+# `docker compose up -d`                          -> Redis only (local development and tests)
+# `docker compose --profile stack up -d --build`  -> + gateway, Prometheus, Grafana
+# Ollama runs on the host (it needs the GPU); the gateway reaches it via host.docker.internal.
 services:
   redis:
     image: redis:8.2-alpine
     ports:
       - "6379:6379"
+
+  gateway:
+    profiles: [stack]
+    build:
+      context: .
+      args:
+        WITH_GUARD: ${WITH_GUARD:-false}
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      GUARD_ENABLED: ${WITH_GUARD:-false}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # needed on Linux; Docker Desktop has it built in
+    volumes:
+      - hf-cache:/home/aegis/.cache/huggingface  # the guard model downloads once, not on every start
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
+      interval: 10s
+      timeout: 3s
+      start_period: 60s
+
+  prometheus:
+    profiles: [stack]
+    image: prom/prometheus:v3.15.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    profiles: [stack]
+    image: grafana/grafana:13.2.2
+    ports:
+      - "3000:3000"
+    environment:
+      # Read-only anonymous access so the dashboard opens without a login. Local demo only.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/aegis.json
+    volumes:
+      - ./ops/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./ops/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+
+volumes:
+  hf-cache:
