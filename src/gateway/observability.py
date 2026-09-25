@@ -56,5 +56,7 @@ async def observe(request: Request, call_next):
             "client_id": getattr(state, "client_id", None),
             "guard_score": getattr(state, "guard_score", None),
             "usage": getattr(state, "usage", None),
+            "cache": getattr(state, "cache", None),
+            "cache_similarity": getattr(state, "cache_similarity", None),
             "duration_ms": round(duration * 1000, 2),
         }))

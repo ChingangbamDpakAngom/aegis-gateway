@@ -16,7 +16,7 @@ Control requests today. Build toward safer, more efficient AI systems tomorrow.
 
 Aegis Gateway is being built to sit between users and AI models. Like a checkpoint at a building entrance, it checks incoming requests before they are allowed through. This helps keep an AI application reliable when usage grows and creates one place to add safeguards, caching, and smarter model selection.
 
-> **What works now:** API-key authentication, strict request validation, and per-client Redis rate limiting that fails closed, plus request IDs, JSON request logs, Prometheus metrics and a readiness check. Allowed messages are answered by a local model served by [Ollama](https://ollama.com) (`llama3.2` by default), with token usage reported per request. Every message is first screened by a prompt-injection classifier. Caching and routing are planned, not shipped.
+> **What works now:** API-key authentication, strict request validation, and per-client Redis rate limiting that fails closed, plus request IDs, JSON request logs, Prometheus metrics and a readiness check. Allowed messages are answered by a local model served by [Ollama](https://ollama.com) (`llama3.2` by default), with token usage reported per request. Every message is first screened by a prompt-injection classifier, and repeated questions are answered from a per-client Redis cache in milliseconds. Model routing is planned, not shipped.
 
 <p align="center">
   <img src="docs/images/aegis-overview.png" width="720" alt="Aegis Gateway overview: each request is authenticated (401), rate-limited (429) and validated (422) before reaching the LLM; Redis outages fail closed with 503. Phases 0 and 1 are done; phases 2 to 7 are next.">
@@ -49,7 +49,9 @@ flowchart TD
     D -->|"No"| Z["422 invalid_request"]
     D -->|"Yes"| G{"Looks like an injection?<br/>DeBERTa classifier"}
     G -->|"Yes"| R["400 prompt_rejected"]
-    G -->|"No"| M{"Model answers?<br/>Ollama /api/chat"}
+    G -->|"No"| K{"Asked before?<br/>per-client Redis cache"}
+    K -->|"Yes"| H["200 OK<br/>cached reply, 0 tokens"]
+    K -->|"No"| M{"Model answers?<br/>Ollama /api/chat"}
     M -->|"Down / error"| W["502 model_unavailable"]
     M -->|"Too slow"| T["504 model_timeout"]
     M -->|"Yes"| E["200 OK<br/>reply + token usage"]
@@ -65,6 +67,7 @@ flowchart TD
 - When the bucket is empty, the `429` response carries a `Retry-After` header saying how many seconds to wait.
 - Only requests that pass every check reach the model, so a rejected request costs no inference. Answers are capped at `MAX_OUTPUT_TOKENS` (512). If Ollama is down the gateway returns `502`, and if it's too slow, `504` ([ADR-004](docs/adr/0004-model-backend-ollama.md)).
 - Before the model, each message is scored by a prompt-injection classifier (`protectai/deberta-v3-base-prompt-injection-v2`, swappable for Llama Prompt Guard 2). Scores at or above `GUARD_THRESHOLD` (0.5) are refused with `400 prompt_rejected`. Long messages are scored in 500-token chunks, so an attack can't hide past the classifier's window. On a public benchmark it made **no false positives but caught only 37% of injections**, so it's a tripwire, not a complete defence ([ADR-005](docs/adr/0005-prompt-injection-guard.md)).
+- Answers are cached in Redis for `CACHE_TTL_S` (1 hour), **per client**, so one client's answers never reach another. A repeat of the same question (ignoring whitespace) returns in ~11 ms instead of ~2–11 s and costs 0 tokens. The response says `"cache": "exact"` or `"miss"`. A semantic cache (similar meaning, via embeddings and Redis 8 vector sets) is built but **off by default**, because the evaluation showed it returns wrong answers: "10 kilometres to miles" got the cached "10 miles to kilometres" answer ([ADR-006](docs/adr/0006-answer-cache.md)).
 - Prompt and completion tokens are returned in `usage`, written to the log line, and counted in `aegis_llm_tokens_total`.
 - If Redis is unreachable, `/chat` **fails closed** with `503` within about half a second instead of serving requests unchecked ([ADR-001](docs/adr/0001-token-bucket-in-redis-fail-closed.md)).
 
@@ -79,7 +82,8 @@ flowchart TD
 | pytest and FastAPI TestClient | Basic API tests | Implemented |
 | Hugging Face Transformers + DeBERTa-v3 injection classifier | Screens every prompt before the model; `scripts/eval_guard.py` measures it | Implemented |
 | Llama Prompt Guard 2 | Drop-in alternative classifier (gated on Hugging Face; set `GUARD_MODEL`) | Supported, not default |
-| Redis cache | Exact-match response caching | Planned |
+| Redis cache | Per-client exact-match answer cache with TTL | Implemented |
+| Redis 8 vector sets + Ollama embeddings (`all-minilm`) | Optional semantic cache; `scripts/eval_semantic_cache.py` picks the threshold | Implemented, off by default |
 | Ollama (`llama3.2`) + httpx2 | Local model that answers `/chat` after all checks pass | Implemented |
 | Hosted model APIs or vLLM | Additional backends for routing | Planned |
 | Rule-based router | Select an appropriate model for a request | Planned |
@@ -176,9 +180,9 @@ uv run pytest -q
 
 Tests use a fake Ollama (`httpx2.MockTransport`), so neither CI nor you need a model to run them. The prompt guard is replaced by a fake scorer the same way, so tests need no PyTorch. To also hit the real models, run `AEGIS_LIVE_MODEL=1 AEGIS_LIVE_GUARD=1 uv run pytest -q -k live` with Ollama running and the `ml` group installed.
 
-Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers API-key authentication (missing, unknown, stored hashed), request validation (empty, oversized, unknown fields), the uniform error format, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, key rotation sharing a bucket, fail-closed behaviour when Redis is down, `/ready` vs `/health`, request-ID handling, the JSON log line, metric labels, the exact request sent to the model, 502/504 on model failures, token accounting, that rate-limited requests never reach the model, prompt-injection refusals (before any inference), the configurable threshold, and chunked screening of long messages. GitHub Actions runs the same suite on every push, with a Redis service container.
+Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers API-key authentication (missing, unknown, stored hashed), request validation (empty, oversized, unknown fields), the uniform error format, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, key rotation sharing a bucket, fail-closed behaviour when Redis is down, `/ready` vs `/health`, request-ID handling, the JSON log line, metric labels, the exact request sent to the model, 502/504 on model failures, token accounting, that rate-limited requests never reach the model, prompt-injection refusals (before any inference), the configurable threshold, chunked screening of long messages, exact cache hits (0 tokens, whitespace-insensitive), per-client cache isolation, cache TTL, and the semantic cache's paraphrase hits, threshold and graceful degradation when the embedding model fails. GitHub Actions runs the same suite on every push, with a Redis service container.
 
-Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (defaults for keys without their own limits), `MAX_MESSAGE_CHARS`, `OLLAMA_URL`, `MODEL`, `MODEL_TIMEOUT_S`, `MAX_OUTPUT_TOKENS`, `GUARD_ENABLED`, `GUARD_MODEL`, `GUARD_THRESHOLD` (see [`config.py`](src/gateway/config.py)).
+Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (defaults for keys without their own limits), `MAX_MESSAGE_CHARS`, `OLLAMA_URL`, `MODEL`, `MODEL_TIMEOUT_S`, `MAX_OUTPUT_TOKENS`, `GUARD_ENABLED`, `GUARD_MODEL`, `GUARD_THRESHOLD`, `CACHE_ENABLED`, `CACHE_TTL_S`, `SEMANTIC_CACHE`, `EMBED_MODEL`, `SIMILARITY_THRESHOLD` (see [`config.py`](src/gateway/config.py)).
 
 PyTorch and Transformers (for prompt screening) are kept in the optional `ml` group: `uv sync --group ml`. Measure the guard with `uv run --group ml python scripts/eval_guard.py [model]`.
 
@@ -194,6 +198,7 @@ aegis-gateway/
 │       │   └── schemas.py         # Request-validation models
 │       ├── core/
 │       │   ├── __init__.py
+│       │   ├── cache.py           # Per-client answer cache (exact + optional semantic)
 │       │   ├── guard.py           # Prompt-injection classifier (chunked scoring)
 │       │   ├── llm.py             # Model backend call (Ollama) + token metrics
 │       │   ├── rate_limiter.py    # Redis rate-limit integration
@@ -205,7 +210,8 @@ aegis-gateway/
 │       ├── observability.py       # Request IDs, JSON logs, Prometheus metrics
 │       └── py.typed
 ├── scripts/
-│   └── eval_guard.py              # Precision/recall/latency of the guard on a public dataset
+│   ├── eval_guard.py              # Precision/recall/latency of the guard on a public dataset
+│   └── eval_semantic_cache.py     # Chooses (or rejects) a semantic-cache threshold
 ├── tests/                         # Automated tests (real Redis, DB 15)
 ├── docs/
 │   ├── adr/                       # Architecture Decision Records
@@ -230,9 +236,9 @@ Additional modules will be added as their features are implemented. Experimental
 - [x] Phase 2: readiness check, request IDs, structured logging, Prometheus metrics ([notes](docs/phases/phase-2.md))
 - [x] Phase 3: answer `/chat` with a local model (Ollama), output cap, 502/504 handling, token accounting ([notes](docs/phases/phase-3.md))
 - [x] Phase 4: prompt-injection screening before the model, evaluated on a public dataset ([notes](docs/phases/phase-4.md))
-- [ ] Add exact-match caching and model routing
-- [ ] Measure latency and cost under load
-- [ ] Explore semantic caching and observability dashboards
+- [x] Phase 5: per-client answer cache; semantic cache evaluated and kept opt-in ([notes](docs/phases/phase-5.md))
+- [ ] Phase 6: rule-based model router with fallback
+- [ ] Phase 7 (v1.0): Docker image and full compose stack, load test, Grafana dashboard
 
 ## Versioning
 

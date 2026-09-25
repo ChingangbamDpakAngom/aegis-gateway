@@ -18,4 +18,4 @@ The gateway makes decisions (401, 429, 503) that nobody could see after the fact
 - `/metrics` is unauthenticated, which is normal for Prometheus targets. It must stay on an internal network or a separate port when deployed.
 - Metrics live in process memory. With several workers or instances, Prometheus scrapes each one and sums them. Multi-process mode for gunicorn workers is needed only if we run that way.
 - No distributed tracing yet. The request ID plays that role while there's a single service. Add OpenTelemetry once the gateway calls a model backend, so a trace spans gateway → model.
-- No Grafana or Prometheus server in `docker-compose.yml` yet. `curl /metrics` shows the raw numbers. Add a dashboard when there's real traffic to look at (Phase 5+).
+- No Grafana or Prometheus server in `docker-compose.yml` yet. `curl /metrics` shows the raw numbers. Add a dashboard when there's real traffic to look at (Phase 7).

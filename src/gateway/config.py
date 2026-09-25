@@ -31,3 +31,13 @@ GUARD_ENABLED = os.getenv("GUARD_ENABLED", "true").lower() == "true"
 GUARD_MODEL = os.getenv("GUARD_MODEL", "protectai/deberta-v3-base-prompt-injection-v2")
 # Messages scoring at or above this injection probability are refused.
 GUARD_THRESHOLD = float(os.getenv("GUARD_THRESHOLD", "0.5"))
+
+# Answer cache (per client). Exact = same message after whitespace normalisation.
+CACHE_ENABLED = os.getenv("CACHE_ENABLED", "true").lower() == "true"
+CACHE_TTL_S = int(os.getenv("CACHE_TTL_S", "3600"))
+# Semantic = similar meaning, via embeddings + Redis vector sets. Off by default: in
+# scripts/eval_semantic_cache.py "10 miles to km" vs "10 km to miles" scores 0.99, so
+# no threshold avoids wrong answers (see ADR-006).
+SEMANTIC_CACHE = os.getenv("SEMANTIC_CACHE", "false").lower() == "true"
+EMBED_MODEL = os.getenv("EMBED_MODEL", "all-minilm")
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.95"))

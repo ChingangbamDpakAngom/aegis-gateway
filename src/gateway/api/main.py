@@ -15,7 +15,7 @@ from starlette.exceptions import HTTPException
 
 from gateway import config
 from gateway.api.schemas import ChatRequest
-from gateway.core import guard
+from gateway.core import cache, guard
 from gateway.core.llm import generate
 from gateway.core.rate_limiter import TOKEN_BUCKET_LUA, take_token
 from gateway.keys import key_hash
@@ -169,6 +169,20 @@ async def chat(request: Request, body: ChatRequest, client: dict = Depends(rate_
         request.state.guard_score = round(score, 4)
         if score >= config.GUARD_THRESHOLD:
             raise GatewayError(400, "prompt_rejected", "The message looks like a prompt-injection attempt")
-    result = await generate(request.app.state.http, body.message)
+    redis, http, client_id = request.app.state.redis, request.app.state.http, client["client_id"]
+    vector = None
+    if config.CACHE_ENABLED:
+        # After the guard, so a cached answer is never served for a message we'd now refuse.
+        hit, vector = await cache.lookup(redis, http, client_id, body.message)
+        if hit:
+            request.state.cache, request.state.cache_similarity = hit["cache"], hit["similarity"]
+            no_tokens = {"prompt_tokens": 0, "completion_tokens": 0}
+            return {"reply": hit["reply"], "model": hit["model"], "usage": no_tokens,
+                    "cache": hit["cache"], "client_id": client_id}
+
+    result = await generate(http, body.message)
     request.state.usage = result["usage"]
-    return {**result, "client_id": client["client_id"]}
+    if config.CACHE_ENABLED:
+        await cache.store(redis, client_id, body.message, result, vector)
+        request.state.cache = "miss"
+    return {**result, "cache": "miss", "client_id": client_id}
