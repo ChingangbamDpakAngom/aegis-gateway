@@ -1,6 +1,8 @@
 import math
 from contextlib import asynccontextmanager
 
+import httpx2
+
 from fastapi import Depends, FastAPI, Request, Security
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
@@ -12,6 +14,7 @@ from starlette.exceptions import HTTPException
 
 from gateway import config
 from gateway.api.schemas import ChatRequest
+from gateway.core.llm import generate
 from gateway.core.rate_limiter import TOKEN_BUCKET_LUA, take_token
 from gateway.keys import key_hash
 from gateway.observability import observe
@@ -27,7 +30,13 @@ async def lifespan(app: FastAPI):
         socket_connect_timeout=config.REDIS_TIMEOUT_S,
     )
     app.state.token_bucket = app.state.redis.register_script(TOKEN_BUCKET_LUA)
+    # One pooled HTTP client for the model backend. Connecting fails fast (Ollama down
+    # -> 502 in ~2 s); generating may take up to MODEL_TIMEOUT_S.
+    app.state.http = httpx2.AsyncClient(
+        base_url=config.OLLAMA_URL, timeout=httpx2.Timeout(config.MODEL_TIMEOUT_S, connect=2.0)
+    )
     yield
+    await app.state.http.aclose()
     await app.state.redis.aclose()
 
 
@@ -76,6 +85,18 @@ async def redis_unavailable(request: Request, exc: RedisError) -> JSONResponse:
     # Fail closed: without Redis neither keys nor limits can be checked, so refuse
     # traffic rather than let it through unchecked.
     return error_response(request, 503, "backend_unavailable", "Gateway backend unavailable, retry shortly")
+
+
+@app.exception_handler(httpx2.TimeoutException)
+async def model_timeout(request: Request, exc: httpx2.TimeoutException) -> JSONResponse:
+    return error_response(request, 504, "model_timeout", "The model took too long to answer")
+
+
+@app.exception_handler(httpx2.HTTPError)
+async def model_unavailable(request: Request, exc: httpx2.HTTPError) -> JSONResponse:
+    # Connection refused, or Ollama answered with an error (e.g. model not pulled).
+    # 502: the gateway is fine, the server behind it isn't.
+    return error_response(request, 502, "model_unavailable", "The model backend is unavailable")
 
 
 # --- Dependencies: who is calling, and are they within their limit? ---
@@ -136,5 +157,7 @@ async def metrics():
 
 
 @app.post("/chat")
-async def chat(body: ChatRequest, client: dict = Depends(rate_limit)):
-    return {"echo": body.message, "client_id": client["client_id"]}
+async def chat(request: Request, body: ChatRequest, client: dict = Depends(rate_limit)):
+    result = await generate(request.app.state.http, body.message)
+    request.state.usage = result["usage"]
+    return {**result, "client_id": client["client_id"]}

@@ -175,6 +175,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx2" },
     { name = "prometheus-client" },
     { name = "python-dotenv" },
     { name = "redis" },
@@ -183,7 +184,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx2" },
     { name = "pytest" },
 ]
 ml = [
@@ -194,6 +194,7 @@ ml = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "httpx2", specifier = ">=2.13.1" },
     { name = "prometheus-client", specifier = ">=0.26.0" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
     { name = "redis", specifier = ">=8.1.0" },
@@ -201,10 +202,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [
-    { name = "httpx2", specifier = ">=2.13.1" },
-    { name = "pytest", specifier = ">=9.1.1" },
-]
+dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 ml = [
     { name = "torch", specifier = ">=2.14.0" },
     { name = "transformers", specifier = ">=5.17.0" },

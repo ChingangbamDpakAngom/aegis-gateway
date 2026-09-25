@@ -16,3 +16,11 @@ RATE_LIMIT_REFILL_PER_S = float(os.getenv("RATE_LIMIT_REFILL_PER_S", "1.0"))
 
 # Longest prompt accepted, in characters. Size drives LLM cost, so cap it at the door.
 MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS", "4000"))
+
+# The model behind /chat. Ollama serves local models over HTTP on port 11434.
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+MODEL = os.getenv("MODEL", "llama3.2")
+# Local generation is slow on CPU; past this, the caller gets 504 instead of waiting forever.
+MODEL_TIMEOUT_S = float(os.getenv("MODEL_TIMEOUT_S", "60"))
+# Caps the answer length, which caps both latency and cost per request.
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "512"))

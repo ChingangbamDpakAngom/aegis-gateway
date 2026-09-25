@@ -1,8 +1,14 @@
 import json
+import os
 import time
+
+import httpx2
+import pytest
 
 from gateway import config
 from gateway.keys import key_hash
+
+from .conftest import use_model
 
 
 def chat(client, key, message="Hello from pytest"):
@@ -27,7 +33,12 @@ def test_chat_with_valid_key(client, new_key):
     response = chat(client, new_key("alice"))
 
     assert response.status_code == 200
-    assert response.json() == {"echo": "Hello from pytest", "client_id": "alice"}
+    assert response.json() == {
+        "reply": "Hello from the fake model",
+        "model": config.MODEL,
+        "usage": {"prompt_tokens": 11, "completion_tokens": 5},
+        "client_id": "alice",
+    }
 
 
 def test_missing_key_is_401(client):
@@ -238,3 +249,92 @@ def test_metrics_count_requests_by_route_and_status(client):
     body = client.get("/metrics").text
     assert "aegis_request_duration_seconds_bucket" in body
     assert "/scanner/probe" not in body  # raw paths never become labels
+
+
+# --- Model backend ---
+
+
+def test_model_request_is_capped_and_not_streamed(client, new_key):
+    sent = []
+
+    def ollama(request):
+        sent.append(json.loads(request.content))
+        return httpx2.Response(200, json={"message": {"content": "ok"}, "eval_count": 1})
+
+    use_model(ollama)
+    chat(client, new_key(), message="What is Redis?")
+
+    [body] = sent
+    assert body["messages"] == [{"role": "user", "content": "What is Redis?"}]
+    assert body["stream"] is False
+    assert body["options"]["num_predict"] == config.MAX_OUTPUT_TOKENS
+
+
+def test_rate_limited_requests_never_reach_the_model(client, new_key):
+    calls = []
+    use_model(lambda request: calls.append(1) or httpx2.Response(200, json={"message": {"content": "ok"}}))
+    key = new_key(capacity=1)
+
+    chat(client, key)
+    chat(client, key)
+
+    assert len(calls) == 1  # the 429 cost nothing
+
+
+def test_model_down_is_502(client, new_key):
+    def refused(request):
+        raise httpx2.ConnectError("connection refused")
+
+    use_model(refused)
+    response = chat(client, new_key())
+
+    assert response.status_code == 502
+    assert error_code(response) == "model_unavailable"
+
+
+def test_model_error_status_is_502(client, new_key):
+    use_model(lambda request: httpx2.Response(404, json={"error": "model not found"}))
+
+    assert chat(client, new_key()).status_code == 502
+
+
+def test_model_timeout_is_504(client, new_key):
+    def slow(request):
+        raise httpx2.ReadTimeout("too slow")
+
+    use_model(slow)
+    response = chat(client, new_key())
+
+    assert response.status_code == 504
+    assert error_code(response) == "model_timeout"
+
+
+def test_tokens_are_counted_and_logged(client, new_key, caplog):
+    from prometheus_client import REGISTRY
+
+    def completion_tokens():
+        labels = {"model": config.MODEL, "kind": "completion"}
+        return REGISTRY.get_sample_value("aegis_llm_tokens_total", labels) or 0
+
+    before = completion_tokens()
+    chat(client, new_key())
+
+    assert completion_tokens() == before + 5
+    [record] = [r for r in caplog.records if r.name == "aegis"]
+    assert json.loads(record.getMessage())["usage"] == {"prompt_tokens": 11, "completion_tokens": 5}
+
+
+@pytest.mark.skipif(not os.getenv("AEGIS_LIVE_MODEL"), reason="set AEGIS_LIVE_MODEL=1 with Ollama running")
+def test_live_model_answers():
+    from fastapi.testclient import TestClient
+
+    from gateway.api.main import app
+    from gateway.keys import create_key
+
+    with TestClient(app) as live:  # real Ollama client from the lifespan, not the fake
+        key = live.portal.call(create_key, app.state.redis, "live-test", None, None)
+        response = chat(live, key, message="Reply with one word: hello")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["reply"].strip()
+    assert response.json()["usage"]["completion_tokens"] > 0
