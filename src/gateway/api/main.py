@@ -154,7 +154,7 @@ async def readiness_check(request: Request):
 
 @app.get("/metrics", include_in_schema=False)
 async def metrics():
-    # ponytail: unauthenticated, like most Prometheus targets; keep it on an
+    # Trade-off: unauthenticated, like most Prometheus targets; keep it on an
     # internal network, or put it behind its own port/auth before exposing the gateway.
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
@@ -163,7 +163,7 @@ async def metrics():
 async def chat(request: Request, body: ChatRequest, client: dict = Depends(rate_limit)):
     if request.app.state.guard is not None:
         # The classifier is CPU-bound; a worker thread keeps the event loop serving others.
-        # ponytail: one request at a time per thread; batch requests if throughput matters.
+        # Trade-off: one request at a time per thread; batch requests if throughput matters.
         score = await asyncio.to_thread(request.app.state.guard, body.message)
         request.state.guard_score = round(score, 4)
         if score >= config.GUARD_THRESHOLD:

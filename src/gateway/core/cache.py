@@ -17,7 +17,7 @@ LOOKUPS = Counter("aegis_cache_lookups_total", "Cache lookups by result", ["resu
 
 # Model calls in progress, by cache key. Found by load testing: 11 identical requests
 # arriving together all missed the cache and queued 11 model calls (6-12 s each).
-# ponytail: per process; several gateway instances would need a Redis lock (SET NX) instead.
+# Trade-off: per process; several gateway instances would need a Redis lock (SET NX) instead.
 _in_flight: dict[str, asyncio.Future] = {}
 
 
@@ -95,7 +95,7 @@ async def store(redis, client_id: str, message: str, result: dict, vector: list[
     answer = json.dumps({"reply": result["reply"], "model": result["model"]})
     await redis.set(_answer_key(client_id, answer_id), answer, ex=config.CACHE_TTL_S)
     if vector is not None:
-        # ponytail: the vector set only shrinks when answers expire and get looked up, or
+        # Trade-off: the vector set only shrinks when answers expire and get looked up, or
         # when the whole set idles out; cap it (VCARD + VREM oldest) if clients cache a lot.
         await redis.vset().vadd(_vector_key(client_id), vector, answer_id)
         await redis.expire(_vector_key(client_id), config.CACHE_TTL_S)

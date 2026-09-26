@@ -69,7 +69,7 @@ Two findings to be able to talk about:
 
 - [ ] Why the guard runs *after* rate limiting but *before* the model?
 - [ ] Why a classifier rather than regex, or asking the LLM itself?
-- [ ] What `asyncio.to_thread` prevents, and what the `ponytail:` comment on it warns about?
+- [ ] What `asyncio.to_thread` prevents, and what the `Trade-off:` comment on it warns about?
 - [ ] Why long messages are chunked, and why the score is the *max* over chunks?
 - [ ] Why `transformers` is imported inside `load()` and not at the top of the file?
 - [ ] How `scorer()` being separate from `load()` makes the chunking testable without PyTorch?

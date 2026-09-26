@@ -64,7 +64,7 @@ In `/docs`, click **Authorize** to paste the key once. That button exists becaus
 - [ ] Why `GatewayError` subclasses `HTTPException`, and how one handler formats both our errors and FastAPI's 404s?
 - [ ] What `extra="forbid"` catches that the default wouldn't?
 - [ ] Why 401 (not 403) for a bad key, and 503 (not 500) when Redis is down?
-- [ ] What the `ponytail:` comment in `schemas.py` warns about, and where the real fix lives?
+- [ ] What the `Trade-off:` comment in `schemas.py` warns about, and where the real fix lives?
 
 ## Interview angle
 

@@ -9,7 +9,7 @@ TOKENS = Counter("aegis_llm_tokens_total", "Tokens processed by the model", ["mo
 
 
 async def generate(http: httpx2.AsyncClient, message: str, model: str, timeout_s: float) -> dict:
-    # ponytail: one request, one full answer (stream=False). Streaming tokens back
+    # Trade-off: one request, one full answer (stream=False). Streaming tokens back
     # (SSE) makes the first word appear sooner; add it when a UI needs it.
     response = await http.post("/api/chat", timeout=httpx2.Timeout(timeout_s, connect=2.0), json={
         "model": model,

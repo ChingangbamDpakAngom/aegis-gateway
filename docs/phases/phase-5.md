@@ -76,7 +76,7 @@ Semantic eval (12 same-meaning pairs, 12 different-meaning pairs, all-minilm): a
 - [ ] Why the semantic cache is off by default, and when you'd turn it on?
 - [ ] Why an embedding failure is treated as a miss rather than a 502?
 - [ ] What bug in redis-py's `vsim()` made `cache.py` call `VSIM` directly, and how the tests caught it?
-- [ ] What the `ponytail:` comment in `store()` warns about?
+- [ ] What the `Trade-off:` comment in `store()` warns about?
 
 ## Interview angle
 

@@ -12,7 +12,7 @@ RUN uv sync --locked --no-dev
 
 # The prompt guard needs PyTorch. The lock file's Linux torch pulls ~3 GB of CUDA libraries,
 # so the optional guard build installs the CPU-only wheel instead.
-# ponytail: these two packages aren't pinned by uv.lock; pin them here if builds must be reproducible.
+# Trade-off: these two packages aren't pinned by uv.lock; pin them here if builds must be reproducible.
 ARG WITH_GUARD=false
 RUN if [ "$WITH_GUARD" = "true" ]; then \
       uv pip install torch --index-url https://download.pytorch.org/whl/cpu && \

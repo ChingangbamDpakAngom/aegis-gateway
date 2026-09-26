@@ -67,7 +67,7 @@ Watch the uvicorn terminal: each request prints one JSON line.
 - [ ] Why the logging happens in `finally`, and what `status = 500` is for?
 - [ ] How `client_id` set in `authenticate()` reaches the middleware (`request.state`)?
 - [ ] Why the API key and message body are never logged?
-- [ ] What the `ponytail:` comment on `/metrics` warns about?
+- [ ] What the `Trade-off:` comment on `/metrics` warns about?
 
 ## Interview angle
 

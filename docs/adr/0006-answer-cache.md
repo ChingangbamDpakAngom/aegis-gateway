@@ -43,6 +43,6 @@ For a cache, a wrong hit is far worse than a miss: a miss costs seconds, a wrong
 
 - Answers can be up to `CACHE_TTL_S` stale. That's fine for general questions, but wrong for anything time-sensitive, and there's no per-request bypass yet. Add a `"cache": false` request option when a client needs it.
 - The model's answers aren't deterministic, so a cached repeat returns the *first* answer every time. That's usually desirable.
-- Redis memory grows with unique questions × clients, bounded by the TTL. Vector sets only shrink when entries are found expired or the set idles out (`ponytail:` note in `cache.py`).
+- Redis memory grows with unique questions × clients, bounded by the TTL. Vector sets only shrink when entries are found expired or the set idles out (`Trade-off:` note in `cache.py`).
 - The semantic path adds one embedding call (~20–100 ms) to every miss when enabled.
 - Next: a cross-encoder or LLM re-check of semantic hits could fix the word-order problem, at extra latency. Revisit if hit rate matters.

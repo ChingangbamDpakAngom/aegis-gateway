@@ -25,7 +25,7 @@ v1.0 has to run for someone else with one command, show its health at a glance, 
 | same, **after** the fix | **1** model call, 10 `coalesced`; p95 3.1 s, 61 req/s |
 | model, 12 new questions, concurrency 4 | 0.9 req/s, p50 3.0 s, p95 6.7 s, bounded by the laptop GPU |
 
-**Fix: request coalescing ("single-flight").** `cache.single_flight()` keeps the in-flight model call per `client + message digest`. Identical requests that arrive while it's running await the same task, marked `"cache": "coalesced"` with 0 tokens. `asyncio.shield` stops one impatient client from cancelling everyone's call. It's per process. With several instances, a Redis `SET NX` lock would be needed (`ponytail:` note).
+**Fix: request coalescing ("single-flight").** `cache.single_flight()` keeps the in-flight model call per `client + message digest`. Identical requests that arrive while it's running await the same task, marked `"cache": "coalesced"` with 0 tokens. `asyncio.shield` stops one impatient client from cancelling everyone's call. It's per process. With several instances, a Redis `SET NX` lock would be needed (`Trade-off:` note).
 
 Two monitoring bugs also only showed up with real traffic:
 
