@@ -17,8 +17,15 @@ RATE_LIMIT_REFILL_PER_S = float(os.getenv("RATE_LIMIT_REFILL_PER_S", "1.0"))
 # Longest prompt accepted, in characters. Size drives LLM cost, so cap it at the door.
 MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS", "4000"))
 
-# The model behind /chat. Ollama serves local models over HTTP on port 11434.
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+# /metrics is unauthenticated (normal for Prometheus). Turn it off on public deployments.
+METRICS_ENABLED = os.getenv("METRICS_ENABLED", "true").lower() == "true"
+
+# The model behind /chat: any OpenAI-compatible server. Locally that is Ollama
+# (port 11434, /v1); in the cloud a hosted API such as Groq.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
+# Empty for local Ollama. For a hosted API this is a secret: set it in the
+# environment (e.g. the host's secrets settings), never in code or git.
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 MODEL = os.getenv("MODEL", "llama3.2")
 # Local generation is slow on CPU; past this, the caller gets 504 instead of waiting forever.
 MODEL_TIMEOUT_S = float(os.getenv("MODEL_TIMEOUT_S", "60"))

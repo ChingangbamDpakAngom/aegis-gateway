@@ -14,12 +14,15 @@ from gateway.keys import create_key
 
 
 def fake_ollama(request: httpx2.Request) -> httpx2.Response:
-    """Stands in for Ollama's /api/chat so tests need no model (and CI no GPU)."""
+    """Stands in for the model backend so tests need no model (and CI no GPU)."""
+    return completion("Hello from the fake model", prompt_tokens=11, completion_tokens=5)
+
+
+def completion(text: str, prompt_tokens: int = 0, completion_tokens: int = 1) -> httpx2.Response:
+    """An OpenAI-compatible /chat/completions response, as Ollama or Groq would send it."""
     return httpx2.Response(200, json={
-        "model": "llama3.2",
-        "message": {"role": "assistant", "content": "Hello from the fake model"},
-        "prompt_eval_count": 11,
-        "eval_count": 5,
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
     })
 
 

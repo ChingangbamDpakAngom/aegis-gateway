@@ -52,8 +52,9 @@ def cosine(a, b):
 
 def similarities(model, pairs):
     texts = [t for pair in pairs for t in pair]
-    vectors = httpx2.post(f"{config.OLLAMA_URL}/api/embed", json={"model": model, "input": texts},
-                          timeout=120).json()["embeddings"]
+    data = httpx2.post(f"{config.LLM_BASE_URL}/embeddings", json={"model": model, "input": texts},
+                       timeout=120).json()["data"]
+    vectors = [item["embedding"] for item in data]
     return [cosine(vectors[i], vectors[i + 1]) for i in range(0, len(vectors), 2)]
 
 

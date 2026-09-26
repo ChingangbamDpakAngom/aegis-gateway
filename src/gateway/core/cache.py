@@ -49,9 +49,9 @@ def _vector_key(client_id: str) -> str:
 
 
 async def _embed(http: httpx2.AsyncClient, text: str) -> list[float]:
-    response = await http.post("/api/embed", json={"model": config.EMBED_MODEL, "input": text})
+    response = await http.post("/embeddings", json={"model": config.EMBED_MODEL, "input": text})
     response.raise_for_status()
-    return response.json()["embeddings"][0]
+    return response.json()["data"][0]["embedding"]
 
 
 async def lookup(redis, http, client_id: str, message: str) -> tuple[dict | None, list[float] | None]:

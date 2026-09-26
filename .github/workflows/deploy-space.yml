@@ -1,0 +1,44 @@
+name: Deploy to Hugging Face Space
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Does nothing until the repository variable HF_SPACE (e.g. "user/aegis-gateway") is set.
+    if: ${{ vars.HF_SPACE != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the Space copy of the repo
+        run: |
+          # Spaces reject binary files outside Git LFS, and the demo doesn't need the docs images.
+          rm -rf .git docs/images
+          # The public demo runs with the prompt guard on.
+          sed -i 's/^ARG WITH_GUARD=false/ARG WITH_GUARD=true/' Dockerfile
+          # A Space reads its settings from YAML at the top of README.md.
+          {
+            echo "---"
+            echo "title: Aegis Gateway"
+            echo "colorFrom: blue"
+            echo "colorTo: green"
+            echo "sdk: docker"
+            echo "app_port: 8000"
+            echo "pinned: false"
+            echo "---"
+            echo
+            echo "Live demo of [Aegis Gateway](https://github.com/${GITHUB_REPOSITORY}), deployed from commit ${GITHUB_SHA::7}."
+          } > README.md
+
+      - name: Push to the Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ vars.HF_SPACE }}
+        run: |
+          git init -q -b main
+          git add -A
+          git -c user.name="deploy" -c user.email="deploy@users.noreply.github.com" commit -qm "Deploy ${GITHUB_SHA::7}"
+          git push --force "https://${HF_SPACE%%/*}:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}" main

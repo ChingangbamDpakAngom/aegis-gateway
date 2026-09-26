@@ -17,7 +17,7 @@ services:
       - "8000:8000"
     environment:
       REDIS_URL: redis://redis:6379/0
-      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
       GUARD_ENABLED: ${WITH_GUARD:-false}
     extra_hosts:
       - "host.docker.internal:host-gateway"  # needed on Linux; Docker Desktop has it built in

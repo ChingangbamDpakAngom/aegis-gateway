@@ -6,7 +6,7 @@ import httpx2
 
 from fastapi import Depends, FastAPI, Request, Security
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.security import APIKeyHeader
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
@@ -31,10 +31,13 @@ async def lifespan(app: FastAPI):
         socket_connect_timeout=config.REDIS_TIMEOUT_S,
     )
     app.state.token_bucket = app.state.redis.register_script(TOKEN_BUCKET_LUA)
-    # One pooled HTTP client for the model backend. Connecting fails fast (Ollama down
+    # One pooled HTTP client for the model backend. Connecting fails fast (backend down
     # -> 502 in ~2 s); generating may take up to MODEL_TIMEOUT_S.
+    auth = {"Authorization": f"Bearer {config.LLM_API_KEY}"} if config.LLM_API_KEY else {}
     app.state.http = httpx2.AsyncClient(
-        base_url=config.OLLAMA_URL, timeout=httpx2.Timeout(config.MODEL_TIMEOUT_S, connect=2.0)
+        base_url=config.LLM_BASE_URL,
+        headers=auth,
+        timeout=httpx2.Timeout(config.MODEL_TIMEOUT_S, connect=2.0),
     )
     # The classifier takes a few seconds to load, so load it once, here, not per request.
     app.state.guard = guard.load(config.GUARD_MODEL) if config.GUARD_ENABLED else None
@@ -152,10 +155,18 @@ async def readiness_check(request: Request):
     return {"status": "ready"}
 
 
+@app.get("/", include_in_schema=False)
+async def home():
+    # Visitors to the bare URL (e.g. the live demo page) land on the interactive docs.
+    return RedirectResponse("/docs")
+
+
 @app.get("/metrics", include_in_schema=False)
 async def metrics():
     # Trade-off: unauthenticated, like most Prometheus targets; keep it on an
-    # internal network, or put it behind its own port/auth before exposing the gateway.
+    # internal network, or switch it off (METRICS_ENABLED=false) on public deployments.
+    if not config.METRICS_ENABLED:
+        raise GatewayError(404, "not_found", "Not Found")
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 

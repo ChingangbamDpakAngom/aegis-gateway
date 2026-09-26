@@ -115,6 +115,10 @@ The load test found a real bug. Before [request coalescing](docs/adr/0008-packag
   <img src="docs/images/grafana-dashboard.png" width="900" alt="Grafana dashboard: requests per second by status, p50/p95 latency, 57% cache hit rate, 50 rate-limited, 3 injections blocked, 3 bad keys, tokens per second by model, and model calls by route.">
 </p>
 
+## Deploy
+
+The gateway talks to any OpenAI-compatible model API, so the same image runs locally against Ollama or in the cloud against a hosted API. [docs/deploy.md](docs/deploy.md) walks through a free public demo: Hugging Face Spaces (gateway), Upstash (Redis) and Groq (model), redeployed automatically on every push to `master`.
+
 ## Run locally
 
 ### Prerequisites
@@ -200,7 +204,7 @@ Tests use a fake Ollama (`httpx2.MockTransport`), so neither CI nor you need a m
 
 Tests run against a real Redis, using database 15 (flushed before each test) so they never touch development data. The suite covers API-key authentication (missing, unknown, stored hashed), request validation (empty, oversized, unknown fields), the uniform error format, bucket exhaustion, `Retry-After`, token refill, separate per-client buckets, key rotation sharing a bucket, fail-closed behaviour when Redis is down, `/ready` vs `/health`, request-ID handling, the JSON log line, metric labels, the exact request sent to the model, 502/504 on model failures, token accounting, that rate-limited requests never reach the model, prompt-injection refusals (before any inference), the configurable threshold, chunked screening of long messages, exact cache hits (0 tokens, whitespace-insensitive), per-client cache isolation, cache TTL, and the semantic cache's paraphrase hits, threshold and graceful degradation when the embedding model fails, the routing rules, per-model timeouts, fallback on error and on timeout, 502 when every model fails, and request coalescing. GitHub Actions runs the same suite on every push, with a Redis service container, and also builds the Docker image.
 
-Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (defaults for keys without their own limits), `MAX_MESSAGE_CHARS`, `OLLAMA_URL`, `MODEL`, `MODEL_TIMEOUT_S`, `MAX_OUTPUT_TOKENS`, `GUARD_ENABLED`, `GUARD_MODEL`, `GUARD_THRESHOLD`, `CACHE_ENABLED`, `CACHE_TTL_S`, `SEMANTIC_CACHE`, `EMBED_MODEL`, `SIMILARITY_THRESHOLD`, `LARGE_MODEL`, `LARGE_MODEL_TIMEOUT_S`, `ROUTE_LONG_CHARS` (see [`config.py`](src/gateway/config.py)).
+Settings come from environment variables or a local `.env` file: `REDIS_URL`, `REDIS_TIMEOUT_S`, `RATE_LIMIT_CAPACITY`, `RATE_LIMIT_REFILL_PER_S` (defaults for keys without their own limits), `MAX_MESSAGE_CHARS`, `METRICS_ENABLED`, `LLM_BASE_URL` (any OpenAI-compatible API; default local Ollama), `LLM_API_KEY`, `MODEL`, `MODEL_TIMEOUT_S`, `MAX_OUTPUT_TOKENS`, `GUARD_ENABLED`, `GUARD_MODEL`, `GUARD_THRESHOLD`, `CACHE_ENABLED`, `CACHE_TTL_S`, `SEMANTIC_CACHE`, `EMBED_MODEL`, `SIMILARITY_THRESHOLD`, `LARGE_MODEL`, `LARGE_MODEL_TIMEOUT_S`, `ROUTE_LONG_CHARS` (see [`config.py`](src/gateway/config.py)).
 
 PyTorch and Transformers (for prompt screening) are kept in the optional `ml` group: `uv sync --group ml`. Measure the guard with `uv run --group ml python scripts/eval_guard.py [model]`.
 
