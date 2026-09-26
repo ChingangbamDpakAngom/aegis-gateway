@@ -4,7 +4,7 @@
 
 ### A protective checkpoint for AI applications
 
-Control requests today. Build toward safer, more efficient AI systems tomorrow.
+Authenticate, rate-limit, screen, cache and route every request before it reaches a model.
 
 ![Status: v1.0.0](https://img.shields.io/badge/status-v1.0.0-243B53?style=flat-square)
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white)
@@ -14,7 +14,7 @@ Control requests today. Build toward safer, more efficient AI systems tomorrow.
 
 ---
 
-Aegis Gateway is being built to sit between users and AI models. Like a checkpoint at a building entrance, it checks incoming requests before they are allowed through. This helps keep an AI application reliable when usage grows and creates one place to add safeguards, caching, and smarter model selection.
+Aegis Gateway sits between users and AI models. Like a checkpoint at a building entrance, it checks every request before it is allowed through, which keeps an AI application reliable as usage grows and gives one place for safeguards, caching and model selection.
 
 > **What works now:** API-key authentication, strict request validation, and per-client Redis rate limiting that fails closed, plus request IDs, JSON request logs, Prometheus metrics and a readiness check. Allowed messages are answered by a local model served by [Ollama](https://ollama.com), with token usage reported per request. A rule-based router sends everyday questions to a small fast model (`llama3.2`) and long or reasoning-heavy ones to a larger model (`gemma2:9b`), falling back to the other if one fails. Every message is first screened by a prompt-injection classifier, and repeated questions are answered from a per-client Redis cache in milliseconds.
 
@@ -29,15 +29,16 @@ Aegis Gateway is being built to sit between users and AI models. Like a checkpoi
 | Anyone can call the service | Require an API key and decide identity server-side |
 | One client sends too many requests | Limit requests per client before they overwhelm the service |
 | Requests are malformed or oversized | Reject invalid inputs before processing |
-| Repeated AI requests cost money | A future cache can reuse suitable responses |
-| Requests vary in difficulty | A future router can select an appropriate model |
-| Suspicious prompts reach a model | A future screening step can flag potential attacks |
+| Suspicious prompts reach a model | Screen every message with a prompt-injection classifier first |
+| Repeated AI requests cost money | Answer repeats from a per-client cache: ~11 ms and 0 tokens |
+| Requests vary in difficulty | Route each message to a small or large model, with fallback |
+| Problems go unnoticed | Log every request and expose Prometheus metrics and a Grafana dashboard |
 
-The first three protections are implemented. The remaining items describe the roadmap.
+All of these are implemented in v1.0.0.
 
 ## Current request flow
 
-The diagram below represents the running application, not the eventual architecture.
+The diagram below is the running v1.0.0 application.
 
 ```mermaid
 flowchart TD
@@ -81,7 +82,7 @@ flowchart TD
 | Redis and Lua scripting | Shared token-bucket rate limiting | Implemented |
 | Docker and Docker Compose | Gateway image (non-root) and a one-command stack: gateway, Redis, Prometheus, Grafana | Implemented |
 | uv | Python environment and dependency management | Implemented |
-| pytest and FastAPI TestClient | Basic API tests | Implemented |
+| pytest and FastAPI TestClient | API, failure-mode and optional live-model tests | Implemented |
 | Hugging Face Transformers + DeBERTa-v3 injection classifier | Screens every prompt before the model; `scripts/eval_guard.py` measures it | Implemented |
 | Llama Prompt Guard 2 | Drop-in alternative classifier (gated on Hugging Face; set `GUARD_MODEL`) | Supported, not default |
 | Redis cache | Per-client exact-match answer cache with TTL | Implemented |
@@ -245,7 +246,6 @@ aegis-gateway/
 └── README.md
 ```
 
-Additional modules will be added as their features are implemented. Experimental scripts are kept separate from the running API and test suite.
 
 ## Roadmap
 
